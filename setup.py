@@ -11,7 +11,7 @@ setup(name='biocpd',
       description='Coherent Point Drift variants (rigid, affine, deformable, PCA/SSM) in NumPy/SciPy',
       long_description=readme(),
       long_description_content_type='text/markdown',
-      url='https://github.com/your-org/biocpd',
+      url='https://github.com/agporto/biocpd',
       classifiers=[
           'Development Status :: 3 - Alpha',
           'License :: OSI Approved :: MIT License',
