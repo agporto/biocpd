@@ -7,7 +7,7 @@ def readme():
 
 
 setup(name='biocpd',
-      version='0.1.0',
+      version='0.1.1',
       description='Coherent Point Drift variants (rigid, affine, deformable, PCA/SSM) in NumPy/SciPy',
       long_description=readme(),
       long_description_content_type='text/markdown',
