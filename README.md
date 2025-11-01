@@ -81,7 +81,7 @@ TY_atl, params_atl = atl.register()
 - `normalize` (atlas): improves stability across scales
 
 ## Acknowledgements
-- This work builds on the excellent original CPD implementation by Siavash Khallaghi (`pycpd`, MIT-licensed) and the CPD method by Myronenko and Song.
+- This work builds on the excellent original CPD implementation by Siavash Khallaghi and Anthony Gatti (`pycpd`, MIT-licensed) and the CPD method by Myronenko and Song.
 - Repository for `pycpd`: https://github.com/siavashk/pycpd
 
 ## Citation
