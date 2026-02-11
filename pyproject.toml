@@ -1,3 +1,38 @@
 [build-system]
 requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta" 
+
+[project]
+name = "biocpd"
+version = "0.1.1"
+description = "Coherent Point Drift variants (rigid, affine, deformable, PCA/SSM) in NumPy/SciPy"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [
+  { name = "Arthur Porto", email = "agporto@gmail.com" }
+]
+keywords = ["point-cloud", "registration", "cpd", "shape-model", "medical-imaging"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering",
+]
+dependencies = [
+  "numpy",
+  "scipy",
+  "scikit-learn",
+  "matplotlib",
+]
+
+[project.urls]
+Homepage = "https://github.com/agporto/biocpd"
+Repository = "https://github.com/agporto/biocpd"
+Issues = "https://github.com/agporto/biocpd/issues"
+
+[tool.setuptools]
+packages = ["biocpd"]

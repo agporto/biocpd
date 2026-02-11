@@ -127,10 +127,11 @@ class EMRegistration(object):
             raise ValueError(
                 "Expected a value between 0 (inclusive) and 1 (exclusive) for w instead got: {}".format(w))
 
-        self.X = X
-        self.Y = Y
-        self.TY = Y
-        self.sigma2 = initialize_sigma2(X, Y) if sigma2 is None else sigma2
+        # Use floating point internally for numerically stable EM updates.
+        self.X = np.asarray(X, dtype=float)
+        self.Y = np.asarray(Y, dtype=float)
+        self.TY = self.Y.copy()
+        self.sigma2 = initialize_sigma2(self.X, self.Y) if sigma2 is None else sigma2
         (self.N, self.D) = self.X.shape
         (self.M, _) = self.Y.shape
         self.tolerance = 0.001 if tolerance is None else tolerance

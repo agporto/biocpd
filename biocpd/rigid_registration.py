@@ -4,7 +4,17 @@ import numbers
 from scipy.spatial import cKDTree
 from scipy.sparse import csr_matrix
 from .emregistration import EMRegistration
-from .utility import is_positive_semi_definite
+
+
+def is_valid_rotation_matrix(R, atol=1e-6):
+    if R.ndim != 2 or R.shape[0] != R.shape[1]:
+        return False
+    if not np.all(np.isfinite(R)):
+        return False
+    I = np.eye(R.shape[0], dtype=R.dtype)
+    if not np.allclose(R.T @ R, I, atol=atol):
+        return False
+    return np.isclose(np.linalg.det(R), 1.0, atol=atol)
 
 
 class RigidRegistration(EMRegistration):
@@ -44,9 +54,9 @@ class RigidRegistration(EMRegistration):
             raise ValueError(
                 'Rigid registration only supports 2D or 3D point clouds. Instead got {}.'.format(self.D))
 
-        if R is not None and ((R.ndim != 2) or (R.shape[0] != self.D) or (R.shape[1] != self.D) or not is_positive_semi_definite(R)):
+        if R is not None and ((R.ndim != 2) or (R.shape[0] != self.D) or (R.shape[1] != self.D) or not is_valid_rotation_matrix(R)):
             raise ValueError(
-                'The rotation matrix can only be initialized to {}x{} positive semi definite matrices. Instead got: {}.'.format(self.D, self.D, R))
+                'The rotation matrix can only be initialized to a valid {}x{} rotation matrix. Instead got: {}.'.format(self.D, self.D, R))
 
         if t is not None and ((t.ndim != 2) or (t.shape[0] != 1) or (t.shape[1] != self.D)):
             raise ValueError(
@@ -63,20 +73,33 @@ class RigidRegistration(EMRegistration):
 
         # sparse E-step acceleration
         self.use_kdtree = bool(use_kdtree)
-        self.k = int(k)
+        self.k = max(1, min(int(k), self.N))
         if self.use_kdtree:
             self.kdtree = cKDTree(self.X)
 
     def expectation(self):
         if self.use_kdtree:
             distances, indices = self.kdtree.query(self.TY, k=self.k)
-            distances = np.clip(distances, np.finfo(self.X.dtype).eps, None)
+            if distances.ndim == 1:
+                distances = distances[:, None]
+                indices = indices[:, None]
+            distances = np.asarray(distances, dtype=float, order="C")
+            indices = np.asarray(indices, dtype=np.int64, order="C")
+
+            mask = np.isfinite(distances) & (indices >= 0) & (indices < self.N)
+            if not mask.any():
+                return super().expectation()
+
+            distances = np.clip(distances, np.finfo(float).eps, None)
             P_vals = np.exp(-distances**2 / (2 * self.sigma2))
             rows = np.arange(self.M).repeat(self.k)
-            P_sparse = csr_matrix((P_vals.ravel(), (rows, indices.ravel())), shape=(self.M, self.N))
+            rows = rows[mask.ravel()]
+            cols = indices.ravel()[mask.ravel()]
+            vals = P_vals.ravel()[mask.ravel()]
+            P_sparse = csr_matrix((vals, (rows, cols)), shape=(self.M, self.N))
             c_term = (2 * np.pi * self.sigma2)**(self.D / 2) * self.w / (1 - self.w) * self.M / self.N
             den_col = np.array(P_sparse.sum(axis=0)).ravel() + c_term
-            den_col = np.clip(den_col, np.finfo(self.X.dtype).eps, None)
+            den_col = np.clip(den_col, np.finfo(float).eps, None)
             inv_den_col = 1.0 / den_col
             self.P = P_sparse.multiply(inv_den_col[np.newaxis, :])
             self.Pt1 = np.array(self.P.sum(axis=0)).ravel()

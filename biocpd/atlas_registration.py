@@ -18,9 +18,9 @@ class AtlasRegistration(EMRegistration):
         Source point cloud of shape (M, D). If `mean_shape` is provided, the
         registration is performed from the mean shape instead of the raw `Y`.
     mean_shape : Optional[np.ndarray]
-        Mean shape as flattened (M*D,) or (M, D). If provided, replaces `Y` as the
-        initial shape in the model's space.
-    U : Optional[np.ndarray]
+        Mean shape as (M, D). If provided, replaces `Y` as the initial shape in
+        the model's space. With `normalize=True`, only (M, D) is accepted.
+    U : np.ndarray
         Shape basis. Either (M, D, K) or (M*D, K).
     eigenvalues : Optional[np.ndarray]
         Eigenvalues for each basis mode, shape (K,).
@@ -43,6 +43,9 @@ class AtlasRegistration(EMRegistration):
         numerically safe radius tied to current sigma2.
     w : float
         Outlier weight (0 <= w < 1). Forwarded to EM base.
+    Notes
+    -----
+    This registrar is SSM-based, so both `U` and `eigenvalues` are required.
     **kwargs : Any
         Forwarded to EM base (e.g., max_iterations, tolerance).
     """
@@ -57,7 +60,7 @@ class AtlasRegistration(EMRegistration):
                  Y: np.ndarray,
                  *,
                  mean_shape: Optional[np.ndarray] = None,
-                 U: Optional[np.ndarray] = None,
+                 U: np.ndarray = None,
                  eigenvalues: Optional[np.ndarray] = None,
                  lambda_reg: float = 0.1,
                  normalize: bool = False,
@@ -69,14 +72,28 @@ class AtlasRegistration(EMRegistration):
                  radius_mode: bool = False,
                  w: float = 0.0,
                  **kwargs: Any) -> None:
-        if lambda_reg is None or eigenvalues is None: raise ValueError("lambda_reg and eigenvalues must be provided.")
+        if U is None:
+            raise ValueError("U must be provided with shape (M, D, K) or (M*D, K).")
+        if lambda_reg is None or eigenvalues is None:
+            raise ValueError("lambda_reg and eigenvalues must be provided.")
+        if lambda_reg < 0:
+            raise ValueError(f"lambda_reg must be non-negative, but got {lambda_reg}")
+        if not isinstance(kdtree_radius_scale, (int, float)) or kdtree_radius_scale <= 0:
+            raise ValueError(
+                f"kdtree_radius_scale must be a positive number, but got {kdtree_radius_scale}"
+            )
         self.normalize = normalize
         X_raw = np.asarray(X, float); Y_raw = np.asarray(Y, float)
         if normalize:
             Xn, c, s = self._normalize_point_cloud(X_raw); Yn = (Y_raw - c) / s
             self.target_centroid, self.target_scale = c, s; X, Y = Xn, Yn
             if mean_shape is not None:
-                ms = (np.asarray(mean_shape, float) - c) / s; mean_shape = ms.reshape(-1) if ms.ndim == 2 else ms
+                ms = np.asarray(mean_shape, float)
+                if ms.ndim != 2 or ms.shape != Y_raw.shape:
+                    raise ValueError(
+                        "With normalize=True, mean_shape must be provided as shape (M, D)."
+                    )
+                mean_shape = (ms - c) / s
             if U is not None: U = np.asarray(U, float) / s
         else:
             X, Y = X_raw, Y_raw; self.target_centroid = np.zeros(Y_raw.shape[1]); self.target_scale = 1.0
@@ -200,7 +217,14 @@ class AtlasRegistration(EMRegistration):
             self.PX  = self.P @ self.X
             return
 
-        diff2 = np.sum((self.X[None, :, :] - self.TY[:, None, :]) ** 2, axis=2)
+        # Dense E-step with norm expansion:
+        # ||x - y||^2 = ||x||^2 + ||y||^2 - 2 y x^T
+        # This is mathematically equivalent to broadcasting, but much faster and
+        # lower-memory on large point sets.
+        x2 = np.sum(self.X * self.X, axis=1)[None, :]      # (1, N)
+        ty2 = np.sum(self.TY * self.TY, axis=1)[:, None]   # (M, 1)
+        cross = self.TY @ self.X.T                          # (M, N)
+        diff2 = np.maximum(ty2 + x2 - 2.0 * cross, 0.0)
         P = np.exp(-diff2 / (2 * self.sigma2))
         c = (2 * np.pi * self.sigma2) ** (self.D / 2) * self.w / (1 - self.w) * self.M / self.N
         den = np.sum(P, axis=0, keepdims=True) + c

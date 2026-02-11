@@ -34,6 +34,12 @@ jobs:
       - name: Install package (editable)
         run: pip install -e .
 
+      - name: Install test deps
+        run: pip install pytest
+
+      - name: Run tests
+        run: pytest -q
+
       - name: Smoke test
         run: python -c "import biocpd; from biocpd import RigidRegistration, AffineRegistration, DeformableRegistration; print('import-ok')"
 
