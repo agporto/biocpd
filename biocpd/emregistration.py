@@ -21,11 +21,17 @@ def initialize_sigma2(X, Y):
     sigma2: float
         Initial variance.
     """
-    (N, D) = X.shape
-    (M, _) = Y.shape
-    diff = X[None, :, :] - Y[:, None, :]
-    err = diff ** 2
-    return np.sum(err) / (D * M * N)
+    (_, D) = X.shape
+    muX = np.mean(X, axis=0)
+    muY = np.mean(Y, axis=0)
+    Xc = X - muX
+    Yc = Y - muY
+    sigma2 = (
+        np.mean(np.sum(Xc * Xc, axis=1))
+        + np.mean(np.sum(Yc * Yc, axis=1))
+        + np.sum((muX - muY) ** 2)
+    ) / D
+    return max(float(sigma2), np.finfo(float).tiny)
 
 
 class EMRegistration(object):
@@ -95,7 +101,8 @@ class EMRegistration(object):
 
     """
 
-    def __init__(self, X, Y, sigma2=None, max_iterations=None, tolerance=None, w=None, *args, **kwargs):
+    def __init__(self, X, Y, sigma2=None, max_iterations=None, tolerance=None,
+                 w=None, dense_block_size=None, *args, **kwargs):
         if type(X) is not np.ndarray or X.ndim != 2:
             raise ValueError(
                 "The target point cloud (X) must be at a 2D numpy array.")
@@ -127,6 +134,16 @@ class EMRegistration(object):
             raise ValueError(
                 "Expected a value between 0 (inclusive) and 1 (exclusive) for w instead got: {}".format(w))
 
+        if dense_block_size is not None and (
+            not isinstance(dense_block_size, numbers.Number) or dense_block_size <= 0
+        ):
+            raise ValueError(
+                "Expected a positive integer for dense_block_size instead got: {}".format(dense_block_size)
+            )
+        elif isinstance(dense_block_size, numbers.Number) and not isinstance(dense_block_size, int):
+            warn("Received a non-integer value for dense_block_size: {}. Casting to integer.".format(dense_block_size))
+            dense_block_size = int(dense_block_size)
+
         # Use floating point internally for numerically stable EM updates.
         self.X = np.asarray(X, dtype=float)
         self.Y = np.asarray(Y, dtype=float)
@@ -140,11 +157,14 @@ class EMRegistration(object):
         self.iteration = 0
         self.diff = np.inf
         self.q = np.inf
-        self.P = np.zeros((self.M, self.N))
+        self.P = None
         self.Pt1 = np.zeros((self.N, ))
         self.P1 = np.zeros((self.M, ))
         self.PX = np.zeros((self.M, self.D))
         self.Np = 0
+        self.X_sq = np.sum(self.X * self.X, axis=1)
+        self._tiny = np.finfo(float).tiny
+        self.dense_block_size = dense_block_size
 
     def register(self, callback=lambda **kwargs: None):
         """
@@ -214,18 +234,56 @@ class EMRegistration(object):
         """
         Compute the expectation step of the EM algorithm.
         """
-        P = np.sum((self.X[None, :, :] - self.TY[:, None, :])**2, axis=2) # (M, N)
-        P = np.exp(-P/(2*self.sigma2))
-        c = (2*np.pi*self.sigma2)**(self.D/2)*self.w/(1. - self.w)*self.M/self.N
+        self._compute_dense_posterior_stats(store_p=True)
 
-        den = np.sum(P, axis = 0, keepdims = True) # (1, N)
-        den = np.clip(den, np.finfo(self.X.dtype).eps, None) + c
+    def _get_dense_block_size(self):
+        if self.dense_block_size is not None:
+            return max(1, min(int(self.dense_block_size), self.N))
 
-        self.P = np.divide(P, den)
-        self.Pt1 = np.sum(self.P, axis=0)
-        self.P1 = np.sum(self.P, axis=1)
-        self.Np = np.sum(self.P1)
-        self.PX = np.matmul(self.P, self.X)
+        # Target roughly 128 MiB across the main dense work buffers.
+        target_bytes = 128 * 1024 * 1024
+        bytes_per_column = max(self.M, 1) * np.dtype(float).itemsize * 3
+        auto_block = max(1, target_bytes // max(bytes_per_column, 1))
+        return min(self.N, max(128, int(auto_block)))
+
+    def _compute_dense_posterior_stats(self, store_p=True, TY=None, block_size=None):
+        TY_arr = self.TY if TY is None else np.asarray(TY, dtype=float)
+        ty_sq = np.sum(TY_arr * TY_arr, axis=1)[:, None]
+        block_size = self._get_dense_block_size() if block_size is None else max(1, min(int(block_size), self.N))
+        c = (2 * np.pi * self.sigma2) ** (self.D / 2) * self.w / (1.0 - self.w) * self.M / self.N
+
+        P = np.empty((self.M, self.N), dtype=float) if store_p else None
+        Pt1 = np.zeros((self.N,), dtype=float)
+        P1 = np.zeros((self.M,), dtype=float)
+        PX = np.zeros((self.M, self.D), dtype=float)
+
+        for start in range(0, self.N, block_size):
+            stop = min(start + block_size, self.N)
+            X_block = self.X[start:stop]
+            weights = TY_arr @ X_block.T
+            weights *= -2.0
+            weights += ty_sq
+            weights += self.X_sq[start:stop][None, :]
+            np.maximum(weights, 0.0, out=weights)
+            weights *= -1.0 / (2.0 * self.sigma2)
+            np.exp(weights, out=weights)
+
+            den = np.sum(weights, axis=0, keepdims=True)
+            den += c
+            np.clip(den, self._tiny, None, out=den)
+            weights /= den
+
+            if store_p:
+                P[:, start:stop] = weights
+            Pt1[start:stop] = np.sum(weights, axis=0)
+            P1 += np.sum(weights, axis=1)
+            PX += weights @ X_block
+
+        self.P = P
+        self.Pt1 = Pt1
+        self.P1 = P1
+        self.Np = float(P1.sum())
+        self.PX = PX
 
     def maximization(self):
         """

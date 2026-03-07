@@ -34,6 +34,11 @@ class AtlasRegistration(EMRegistration):
         Number of neighbors for the k-NN E-step.
     kdtree_radius_scale : float
         Threshold scale to switch to sparse mode based on sigma2.
+    dense_block_size : Optional[int]
+        Dense E-step column block size. Defaults to 5000 for atlas workloads.
+    store_posterior : bool
+        If True, retain the posterior matrix `P`. Keeping this disabled reduces
+        memory pressure for large atlas problems.
     optimize_similarity : bool
         If True, optimize similarity (R, s, t) each iteration via weighted Procrustes.
     with_scale : bool
@@ -67,6 +72,8 @@ class AtlasRegistration(EMRegistration):
                  use_kdtree: bool = True,
                  k: int = 10,
                  kdtree_radius_scale: float = 10.0,
+                 dense_block_size: Optional[int] = 5000,
+                 store_posterior: bool = False,
                  optimize_similarity: bool = True,
                  with_scale: bool = True,
                  radius_mode: bool = False,
@@ -82,6 +89,7 @@ class AtlasRegistration(EMRegistration):
             raise ValueError(
                 f"kdtree_radius_scale must be a positive number, but got {kdtree_radius_scale}"
             )
+        dense_block_size = 5000 if dense_block_size is None else dense_block_size
         self.normalize = normalize
         X_raw = np.asarray(X, float); Y_raw = np.asarray(Y, float)
         if normalize:
@@ -97,12 +105,13 @@ class AtlasRegistration(EMRegistration):
             if U is not None: U = np.asarray(U, float) / s
         else:
             X, Y = X_raw, Y_raw; self.target_centroid = np.zeros(Y_raw.shape[1]); self.target_scale = 1.0
-        super().__init__(X=X, Y=Y, w=w, **kwargs)
+        super().__init__(X=X, Y=Y, w=w, dense_block_size=dense_block_size, **kwargs)
 
         self.use_kdtree = use_kdtree; self._use_sparse = False
         self.N, self.D = self.X.shape; self.M = self.Y.shape[0]
         self.lambda_reg = float(lambda_reg); self.optimize_similarity = bool(optimize_similarity); self.with_scale = bool(with_scale)
         self.radius_mode = bool(radius_mode)
+        self.store_posterior = bool(store_posterior)
 
         ev = np.asarray(eigenvalues, float); 
         if ev.ndim != 1: raise ValueError("eigenvalues has an invalid shape.")
@@ -125,19 +134,22 @@ class AtlasRegistration(EMRegistration):
         floor = max(1e-12, np.finfo(self.L.dtype).eps)
         self.L = np.clip(self.L, floor, None)
         self.invL = 1.0 / self.L
+        self._diag_idx = np.diag_indices(self.K)
+        self._log_eps = np.log(np.finfo(float).eps)
 
         dx = self.X.max(0) - self.X.min(0)
         self.kdtree_radius_threshold = float(np.linalg.norm(dx)) / float(kdtree_radius_scale)
+        self._variance_floor = 1e-6 * float(np.dot(dx, dx)) / self.D
         self.k = max(1, min(int(k), self.N))
         if use_kdtree: self.kdtree = cKDTree(self.X)
 
         self.r = np.sqrt(self.sigma2)
         self.R = np.eye(self.D); self.s = 1.0; self.t = np.zeros((1, self.D))
         self.TY = self.Y.copy(); self.TY_world = self._denormalize(self.TY)
-        self.Y_flat = self.Y.ravel()
 
         self.P1_ext = np.empty(self.MD); self.WU = np.empty((self.MD, self.K))
         self.b = np.zeros((self.K, 1)); self.prev_b = self.b.copy()
+        self._deformation = np.zeros((self.M, self.D))
 
     def _denormalize(self, pts: np.ndarray) -> np.ndarray:
         return pts*self.target_scale + self.target_centroid if self.normalize else pts
@@ -159,6 +171,30 @@ class AtlasRegistration(EMRegistration):
             TY_norm, params = super().register(callback=callback)
         return self._denormalize(TY_norm), params
 
+    def maximization(self) -> None:
+        # Atlas update_transform already computes the new transformed points.
+        self.update_transform()
+        self.update_variance()
+
+    def _accumulate_sparse_stats(self, rows: np.ndarray, cols: np.ndarray, weights: np.ndarray) -> None:
+        c = (2 * np.pi * self.sigma2) ** (self.D / 2) * self.w / (1 - self.w) * self.M / self.N
+        den = np.bincount(cols, weights=weights, minlength=self.N).astype(float, copy=False)
+        den += c
+        np.maximum(den, self._tiny, out=den)
+
+        norm_weights = weights / den[cols]
+        self.P = csr_matrix((norm_weights, (rows, cols)), shape=(self.M, self.N)) if self.store_posterior else None
+        self.Pt1 = np.bincount(cols, weights=norm_weights, minlength=self.N)
+        self.P1 = np.bincount(rows, weights=norm_weights, minlength=self.M)
+        self.Np = float(self.P1.sum())
+
+        PX = np.empty((self.M, self.D), dtype=float)
+        for dim in range(self.D):
+            PX[:, dim] = np.bincount(
+                rows, weights=norm_weights * self.X[cols, dim], minlength=self.M
+            )
+        self.PX = PX
+
     def expectation(self) -> None:
         if self.use_kdtree and not self._use_sparse and self.sigma2 < self.kdtree_radius_threshold ** 2:
             self._use_sparse = True
@@ -171,74 +207,38 @@ class AtlasRegistration(EMRegistration):
                 self._use_sparse = False
                 return self.expectation()
 
-            d, idx = self.kdtree.query(TYq, k=self.k)
+            d, idx = self.kdtree.query(TYq, k=self.k, workers=-1)
             if d.ndim == 1:
-                d = d[:, None]; idx = idx[:, None]
-            else:
-                d   = np.asarray(d,   dtype=float,   order="C")
-                idx = np.asarray(idx, dtype=np.int64, order="C")
+                d = d[:, None]
+                idx = idx[:, None]
+            d = np.asarray(d, dtype=float, order="C")
+            idx = np.asarray(idx, dtype=np.int64, order="C")
 
             mask = np.isfinite(d) & (idx >= 0) & (idx < self.N)
             # Optional radius gating
             if self.radius_mode:
-                rad = float(np.sqrt(-2.0 * self.sigma2 * np.log(np.finfo(self.X.dtype).eps)))
+                rad = float(np.sqrt(-2.0 * self.sigma2 * self._log_eps))
                 mask &= (d <= rad)
             if not mask.any():
                 self._use_sparse = False
                 return self.expectation()
 
-            Pv = np.exp(-(np.minimum(d, np.sqrt(-2.0 * self.sigma2 * np.log(np.finfo(self.X.dtype).eps))) ** 2) / (2.0 * self.sigma2))
+            nz_rows, nz_cols = np.nonzero(mask)
+            base_rows = np.where(valid_rows)[0] if not valid_rows.all() else np.arange(self.M)
+            rows = base_rows[nz_rows]
+            cols = idx[nz_rows, nz_cols]
+            vals = np.exp(-(d[nz_rows, nz_cols] ** 2) / (2.0 * self.sigma2))
 
-            base_rows = (np.where(valid_rows)[0] if not valid_rows.all() else np.arange(self.M))
-            rows_all  = np.repeat(base_rows, self.k)
-            rows = rows_all[mask.ravel()]
-            cols = idx.ravel()[mask.ravel()]
-            vals = Pv.ravel()[mask.ravel()]
-
-            if cols.size:
-                mx = int(cols.max()); mn = int(cols.min())
-                if not (0 <= mn and mx < self.N):
-                    keep = (cols >= 0) & (cols < self.N)
-                    rows, cols, vals = rows[keep], cols[keep], vals[keep]
-
-            Psp = csr_matrix((vals, (rows, cols)), shape=(self.M, self.N))
-
-            c = (2 * np.pi * self.sigma2) ** (self.D / 2) * self.w / (1 - self.w) * self.M / self.N
-            den = np.asarray(Psp.sum(axis=0)).ravel() + c
-            den = np.maximum(den, np.finfo(float).tiny)
-
-            Psp = Psp.tocsr()
-            Psp.data *= (1.0 / den)[Psp.indices]
-            self.P = Psp
-
-            self.Pt1 = np.asarray(self.P.sum(axis=0)).ravel()
-            self.P1  = np.asarray(self.P.sum(axis=1)).ravel()
-            self.Np  = float(self.P1.sum())
-            self.PX  = self.P @ self.X
+            self._accumulate_sparse_stats(rows, cols, vals)
             return
 
-        # Dense E-step with norm expansion:
-        # ||x - y||^2 = ||x||^2 + ||y||^2 - 2 y x^T
-        # This is mathematically equivalent to broadcasting, but much faster and
-        # lower-memory on large point sets.
-        x2 = np.sum(self.X * self.X, axis=1)[None, :]      # (1, N)
-        ty2 = np.sum(self.TY * self.TY, axis=1)[:, None]   # (M, 1)
-        cross = self.TY @ self.X.T                          # (M, N)
-        diff2 = np.maximum(ty2 + x2 - 2.0 * cross, 0.0)
-        P = np.exp(-diff2 / (2 * self.sigma2))
-        c = (2 * np.pi * self.sigma2) ** (self.D / 2) * self.w / (1 - self.w) * self.M / self.N
-        den = np.sum(P, axis=0, keepdims=True) + c
-        den = np.clip(den, np.finfo(float).tiny, None)
-        self.P   = P / den
-        self.Pt1 = self.P.sum(axis=0)
-        self.P1  = self.P.sum(axis=1)
-        self.Np  = float(self.P1.sum())
-        self.PX  = self.P @ self.X
+        self._compute_dense_posterior_stats(store_p=self.store_posterior)
 
-    def _weighted_similarity_update(self, Yb: np.ndarray) -> Tuple[np.ndarray, float, np.ndarray]:
+    def _weighted_similarity_update(self, Yb: np.ndarray, xbar: Optional[np.ndarray] = None) -> Tuple[np.ndarray, float, np.ndarray]:
         tiny = np.finfo(float).tiny
         w = self.P1; wsum = max(self.Np, tiny)
-        xbar = self.PX / np.maximum(w[:,None], tiny)
+        if xbar is None:
+            xbar = self.PX / np.maximum(w[:, None], tiny)
         mu_x = (w[:,None]*xbar).sum(axis=0, keepdims=True)/wsum
         mu_y = (w[:,None]*Yb ).sum(axis=0, keepdims=True)/wsum
         Xc = xbar - mu_x; Yc = Yb - mu_y
@@ -265,19 +265,20 @@ class AtlasRegistration(EMRegistration):
         A = self.U_flat.T.dot(self.WU)
         s_for_prior = (self.s if self.with_scale else 1.0)
         gamma = self.lambda_reg * self.sigma2 / (s_for_prior**2)
-        A[np.diag_indices(self.K)] += gamma * self.invL
-        rhs = self.U_flat.T.dot(self.P1_ext * E).reshape(self.K,1)
+        A[self._diag_idx] += gamma * self.invL
+        rhs = self.WU.T.dot(E).reshape(self.K, 1)
         try:
             c, low = cho_factor(A, overwrite_a=True, check_finite=False)
             b_mle = cho_solve((c, low), rhs, overwrite_b=True, check_finite=False)
         except np.linalg.LinAlgError:
-            A[np.diag_indices(self.K)] += 1e-8
+            A[self._diag_idx] += 1e-8
             c, low = cho_factor(A, overwrite_a=False, check_finite=False)
             b_mle = cho_solve((c, low), rhs, overwrite_b=False, check_finite=False)
         self.b = b_mle
-        Yb = self.Y + self.U_flat.dot(self.b).reshape(self.M, self.D)
+        self._deformation[:] = self.U_flat.dot(self.b).reshape(self.M, self.D)
+        Yb = self.Y + self._deformation
         if self.optimize_similarity:
-            R, s, t = self._weighted_similarity_update(Yb)
+            R, s, t = self._weighted_similarity_update(Yb, xbar=xbar)
             self.R = R; self.s = float(s if self.with_scale else 1.0); self.t = t
             TY = self._apply_similarity(Yb)
         else:
@@ -289,11 +290,10 @@ class AtlasRegistration(EMRegistration):
         old = self.sigma2; tiny = np.finfo(float).tiny
         if getattr(self, "Np", 0.0) <= tiny: self.sigma2 = max(old, tiny)
         else:
-            xPx = np.dot(self.Pt1, np.sum(self.X*self.X, axis=1))
+            xPx = np.dot(self.Pt1, self.X_sq)
             yPy = np.dot(self.P1, np.sum(self.TY*self.TY, axis=1))
             trPXY = np.sum(self.TY * self.PX); self.sigma2 = (xPx - 2*trPXY + yPy) / (self.Np*self.D)
-        bb = self.X.max(0) - self.X.min(0); floor = 1e-6 * float(np.dot(bb, bb)) / self.D
-        if self.sigma2 < floor: self.sigma2 = floor
+        if self.sigma2 < self._variance_floor: self.sigma2 = self._variance_floor
         self.r = np.sqrt(self.sigma2)
         self.sigma_diff = abs(self.sigma2 - old)
         self.diff = max(self.sigma_diff / (self.sigma2 + 1e-8), getattr(self, "b_diff", 0.0))
@@ -302,12 +302,12 @@ class AtlasRegistration(EMRegistration):
         return {"U_flat": self.U_flat, "b": self.b, "R": self.R, "s": self.s, "t": self.t}
 
     def transformed_points(self, denormalize: bool = True) -> np.ndarray:
-        Yb = self.Y + self.U_flat.dot(self.b).reshape(self.M, self.D)
+        Yb = self.Y + self._deformation
         pts = self._apply_similarity(Yb)
         return self._denormalize(pts) if (denormalize and self.normalize) else pts
 
     def transform_point_cloud(self, Y: Optional[np.ndarray] = None) -> np.ndarray:
-        delta = self.U_flat.dot(self.b).reshape(self.M, self.D)
+        delta = self._deformation
         base = self.Y if Y is None else np.asarray(Y, float)
         if base.shape != (self.M, self.D): raise ValueError("Y must be of shape (M, D).")
         if self.normalize and Y is not None: base = (base - self.target_centroid) / self.target_scale
