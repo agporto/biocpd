@@ -188,3 +188,28 @@ def test_atlas_default_dense_block_size_targets_5000():
         max_iterations=1,
     )
     assert reg._get_dense_block_size() == 5000
+
+
+def test_atlas_float32_dtype_is_preserved_internals():
+    X, Y, U, L = _atlas_inputs(seed=23)
+    X = X.astype(np.float32)
+    Y = Y.astype(np.float32)
+    U = U.astype(np.float32)
+    L = L.astype(np.float32)
+
+    reg = AtlasRegistration(
+        X=X,
+        Y=Y,
+        U=U,
+        eigenvalues=L,
+        dtype=np.float32,
+        use_kdtree=False,
+        max_iterations=2,
+    )
+    TY, _ = reg.register()
+
+    assert TY.dtype == np.float32
+    assert reg.X.dtype == np.float32
+    assert reg.Y.dtype == np.float32
+    assert reg.U_flat.dtype == np.float32
+    assert reg.L.dtype == np.float32

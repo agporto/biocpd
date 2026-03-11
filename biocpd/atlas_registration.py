@@ -56,9 +56,13 @@ class AtlasRegistration(EMRegistration):
     """
     @staticmethod
     def _normalize_point_cloud(pc: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float]:
-        pc = np.asarray(pc, float); c = np.mean(pc, axis=0)
-        centered = pc - c; s = np.sqrt(np.mean(np.sum(centered**2, axis=1)))
-        return (centered / (s if s>=np.finfo(float).eps else 1.0), c, s if s>=np.finfo(float).eps else 1.0)
+        pc = np.asarray(pc)
+        eps = np.finfo(pc.dtype).eps if np.issubdtype(pc.dtype, np.floating) else np.finfo(np.float64).eps
+        c = np.mean(pc, axis=0, dtype=pc.dtype)
+        centered = pc - c
+        s = np.sqrt(np.mean(np.sum(centered**2, axis=1), dtype=pc.dtype), dtype=pc.dtype)
+        scale = s if s >= eps else 1.0
+        return centered / scale, c, scale
 
     def __init__(self,
                  X: np.ndarray,
@@ -78,7 +82,11 @@ class AtlasRegistration(EMRegistration):
                  with_scale: bool = True,
                  radius_mode: bool = False,
                  w: float = 0.0,
+                 dtype: np.dtype = np.float64,
                  **kwargs: Any) -> None:
+        dtype = np.dtype(dtype)
+        if not np.issubdtype(dtype, np.floating):
+            raise ValueError(f"dtype must be a floating-point type, but got {dtype}")
         if U is None:
             raise ValueError("U must be provided with shape (M, D, K) or (M*D, K).")
         if lambda_reg is None or eigenvalues is None:
@@ -91,21 +99,21 @@ class AtlasRegistration(EMRegistration):
             )
         dense_block_size = 5000 if dense_block_size is None else dense_block_size
         self.normalize = normalize
-        X_raw = np.asarray(X, float); Y_raw = np.asarray(Y, float)
+        X_raw = np.asarray(X, dtype); Y_raw = np.asarray(Y, dtype)
         if normalize:
             Xn, c, s = self._normalize_point_cloud(X_raw); Yn = (Y_raw - c) / s
             self.target_centroid, self.target_scale = c, s; X, Y = Xn, Yn
             if mean_shape is not None:
-                ms = np.asarray(mean_shape, float)
+                ms = np.asarray(mean_shape, dtype)
                 if ms.ndim != 2 or ms.shape != Y_raw.shape:
                     raise ValueError(
                         "With normalize=True, mean_shape must be provided as shape (M, D)."
                     )
                 mean_shape = (ms - c) / s
-            if U is not None: U = np.asarray(U, float) / s
+            if U is not None: U = np.asarray(U, dtype) / s
         else:
-            X, Y = X_raw, Y_raw; self.target_centroid = np.zeros(Y_raw.shape[1]); self.target_scale = 1.0
-        super().__init__(X=X, Y=Y, w=w, dense_block_size=dense_block_size, **kwargs)
+            X, Y = X_raw, Y_raw; self.target_centroid = np.zeros(Y_raw.shape[1], dtype=dtype); self.target_scale = 1.0
+        super().__init__(X=X, Y=Y, w=w, dense_block_size=dense_block_size, dtype=dtype, **kwargs)
 
         self.use_kdtree = use_kdtree; self._use_sparse = False
         self.N, self.D = self.X.shape; self.M = self.Y.shape[0]
@@ -113,15 +121,15 @@ class AtlasRegistration(EMRegistration):
         self.radius_mode = bool(radius_mode)
         self.store_posterior = bool(store_posterior)
 
-        ev = np.asarray(eigenvalues, float); 
+        ev = np.asarray(eigenvalues, dtype)
         if ev.ndim != 1: raise ValueError("eigenvalues has an invalid shape.")
-        U_arr = np.asarray(U, float); self.K = ev.shape[0]; self.MD = self.M * self.D
+        U_arr = np.asarray(U, dtype); self.K = ev.shape[0]; self.MD = self.M * self.D
         if U_arr.ndim == 3 and U_arr.shape == (self.M, self.D, self.K): self.U_flat = U_arr.reshape(self.MD, self.K)
         elif U_arr.ndim == 2 and U_arr.shape == (self.MD, self.K): self.U_flat = U_arr.copy()
         else: raise ValueError("U has an invalid shape.")
 
         if mean_shape is not None:
-            ms = np.asarray(mean_shape, float)
+            ms = np.asarray(mean_shape, dtype)
             if ms.ndim == 1 and ms.size == self.MD: self.mean_shape = ms.reshape(self.M, self.D)
             elif ms.ndim == 2 and ms.shape == (self.M, self.D): self.mean_shape = ms.copy()
             else: raise ValueError("mean_shape has an invalid shape.")
@@ -130,12 +138,12 @@ class AtlasRegistration(EMRegistration):
 
         self.L = (ev/(self.target_scale*self.target_scale)).copy() if self.normalize else ev.copy()
         if self.L.shape != (self.K,): raise ValueError("eigenvalues has an invalid shape.")
-        self.L = np.asarray(self.L, dtype=float)
-        floor = max(1e-12, np.finfo(self.L.dtype).eps)
+        self.L = np.asarray(self.L, dtype=self.dtype)
+        floor = max(1e-12, np.finfo(self.dtype).eps)
         self.L = np.clip(self.L, floor, None)
         self.invL = 1.0 / self.L
         self._diag_idx = np.diag_indices(self.K)
-        self._log_eps = np.log(np.finfo(float).eps)
+        self._log_eps = np.log(np.finfo(self.dtype).eps)
 
         dx = self.X.max(0) - self.X.min(0)
         self.kdtree_radius_threshold = float(np.linalg.norm(dx)) / float(kdtree_radius_scale)
@@ -144,19 +152,21 @@ class AtlasRegistration(EMRegistration):
         if use_kdtree: self.kdtree = cKDTree(self.X)
 
         self.r = np.sqrt(self.sigma2)
-        self.R = np.eye(self.D); self.s = 1.0; self.t = np.zeros((1, self.D))
+        self.R = np.eye(self.D, dtype=self.dtype)
+        self.s = self.dtype.type(1.0)
+        self.t = np.zeros((1, self.D), dtype=self.dtype)
         self.TY = self.Y.copy(); self.TY_world = self._denormalize(self.TY)
 
-        self.P1_ext = np.empty(self.MD); self.WU = np.empty((self.MD, self.K))
-        self.b = np.zeros((self.K, 1)); self.prev_b = self.b.copy()
-        self._deformation = np.zeros((self.M, self.D))
+        self.P1_ext = np.empty(self.MD, dtype=self.dtype); self.WU = np.empty((self.MD, self.K), dtype=self.dtype)
+        self.b = np.zeros((self.K, 1), dtype=self.dtype); self.prev_b = self.b.copy()
+        self._deformation = np.zeros((self.M, self.D), dtype=self.dtype)
 
     def _denormalize(self, pts: np.ndarray) -> np.ndarray:
         return pts*self.target_scale + self.target_centroid if self.normalize else pts
     def _apply_similarity(self, Z: np.ndarray) -> np.ndarray: return (self.s * (Z @ self.R.T)) + self.t
     def _inverse_similarity(self, Z: np.ndarray) -> np.ndarray:
         s = self.s if self.with_scale else 1.0
-        s = s if s>np.finfo(float).tiny else 1.0
+        s = s if s>np.finfo(self.dtype).tiny else 1.0
         return (Z - self.t) @ self.R / s
 
     def register(self, callback: Callable[..., None] = lambda **kwargs: None) -> Tuple[np.ndarray, Dict[str, Any]]:
@@ -188,7 +198,7 @@ class AtlasRegistration(EMRegistration):
         self.P1 = np.bincount(rows, weights=norm_weights, minlength=self.M)
         self.Np = float(self.P1.sum())
 
-        PX = np.empty((self.M, self.D), dtype=float)
+        PX = np.empty((self.M, self.D), dtype=self.dtype)
         for dim in range(self.D):
             PX[:, dim] = np.bincount(
                 rows, weights=norm_weights * self.X[cols, dim], minlength=self.M
@@ -211,7 +221,7 @@ class AtlasRegistration(EMRegistration):
             if d.ndim == 1:
                 d = d[:, None]
                 idx = idx[:, None]
-            d = np.asarray(d, dtype=float, order="C")
+            d = np.asarray(d, dtype=self.dtype, order="C")
             idx = np.asarray(idx, dtype=np.int64, order="C")
 
             mask = np.isfinite(d) & (idx >= 0) & (idx < self.N)
@@ -235,7 +245,7 @@ class AtlasRegistration(EMRegistration):
         self._compute_dense_posterior_stats(store_p=self.store_posterior)
 
     def _weighted_similarity_update(self, Yb: np.ndarray, xbar: Optional[np.ndarray] = None) -> Tuple[np.ndarray, float, np.ndarray]:
-        tiny = np.finfo(float).tiny
+        tiny = np.finfo(self.dtype).tiny
         w = self.P1; wsum = max(self.Np, tiny)
         if xbar is None:
             xbar = self.PX / np.maximum(w[:, None], tiny)
@@ -244,18 +254,18 @@ class AtlasRegistration(EMRegistration):
         Xc = xbar - mu_x; Yc = Yb - mu_y
         C = (Yc.T * w).dot(Xc)
         U, S, Vt = np.linalg.svd(C, full_matrices=False)
-        M = np.eye(self.D); M[-1,-1] = np.sign(np.linalg.det(U@Vt))
+        M = np.eye(self.D, dtype=self.dtype); M[-1,-1] = np.sign(np.linalg.det(U@Vt))
         R = U @ M @ Vt
         if self.with_scale:
             num = np.trace(R.T @ C)
             den = float((w * (Yc*Yc).sum(axis=1)).sum()); s = float(num / max(den, tiny))
         else:
-            s = 1.0
+            s = self.dtype.type(1.0)
         t = mu_x - s*(mu_y @ R.T)
         return R, s, t
 
     def update_transform(self) -> None:
-        tiny = np.finfo(float).tiny
+        tiny = np.finfo(self.dtype).tiny
         self.P1_ext[:] = np.repeat(self.P1, self.D)
         P1_safe = np.maximum(self.P1, tiny)[:,None]
         xbar = self.PX / P1_safe
@@ -287,7 +297,7 @@ class AtlasRegistration(EMRegistration):
         self.b_diff = float(np.mean(np.abs(self.b - self.prev_b))); self.prev_b[:] = self.b
 
     def update_variance(self) -> None:
-        old = self.sigma2; tiny = np.finfo(float).tiny
+        old = self.sigma2; tiny = np.finfo(self.dtype).tiny
         if getattr(self, "Np", 0.0) <= tiny: self.sigma2 = max(old, tiny)
         else:
             xPx = np.dot(self.Pt1, self.X_sq)
@@ -308,7 +318,7 @@ class AtlasRegistration(EMRegistration):
 
     def transform_point_cloud(self, Y: Optional[np.ndarray] = None) -> np.ndarray:
         delta = self._deformation
-        base = self.Y if Y is None else np.asarray(Y, float)
+        base = self.Y if Y is None else np.asarray(Y, dtype=self.dtype)
         if base.shape != (self.M, self.D): raise ValueError("Y must be of shape (M, D).")
         if self.normalize and Y is not None: base = (base - self.target_centroid) / self.target_scale
         out = self._apply_similarity(base + delta)
