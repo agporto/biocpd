@@ -48,20 +48,33 @@ class AffineRegistration(EMRegistration):
 
         # sparse E-step acceleration
         self.use_kdtree = bool(use_kdtree)
-        self.k = int(k)
+        self.k = max(1, min(int(k), self.N))
         if self.use_kdtree:
             self.kdtree = cKDTree(self.X)
 
     def expectation(self):
         if self.use_kdtree:
             distances, indices = self.kdtree.query(self.TY, k=self.k)
-            distances = np.clip(distances, np.finfo(self.X.dtype).eps, None)
+            if distances.ndim == 1:
+                distances = distances[:, None]
+                indices = indices[:, None]
+            distances = np.asarray(distances, dtype=float, order="C")
+            indices = np.asarray(indices, dtype=np.int64, order="C")
+
+            mask = np.isfinite(distances) & (indices >= 0) & (indices < self.N)
+            if not mask.any():
+                return super().expectation()
+
+            distances = np.clip(distances, np.finfo(float).eps, None)
             P_vals = np.exp(-distances**2 / (2 * self.sigma2))
             rows = np.arange(self.M).repeat(self.k)
-            P_sparse = csr_matrix((P_vals.ravel(), (rows, indices.ravel())), shape=(self.M, self.N))
+            rows = rows[mask.ravel()]
+            cols = indices.ravel()[mask.ravel()]
+            vals = P_vals.ravel()[mask.ravel()]
+            P_sparse = csr_matrix((vals, (rows, cols)), shape=(self.M, self.N))
             c_term = (2 * np.pi * self.sigma2)**(self.D / 2) * self.w / (1 - self.w) * self.M / self.N
             den_col = np.array(P_sparse.sum(axis=0)).ravel() + c_term
-            den_col = np.clip(den_col, np.finfo(self.X.dtype).eps, None)
+            den_col = np.clip(den_col, np.finfo(float).eps, None)
             inv_den_col = 1.0 / den_col
             self.P = P_sparse.multiply(inv_den_col[np.newaxis, :])
             self.Pt1 = np.array(self.P.sum(axis=0)).ravel()

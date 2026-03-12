@@ -62,10 +62,10 @@ TY_con, params_con = con.register()
 
 # Atlas / Statistical Shape Model CPD
 M, D, K = 200, 3, 12
-mean_shape = rng.normal(size=(M, D)).reshape(-1)
+mean_shape = rng.normal(size=(M, D))
 U = rng.normal(size=(M*D, K))
 L = np.abs(rng.normal(size=(K,))) + 1e-1
-atl = AtlasRegistration(X=X, Y=mean_shape.reshape(M, D), mean_shape=mean_shape,
+atl = AtlasRegistration(X=X, Y=mean_shape, mean_shape=mean_shape,
                         U=U, eigenvalues=L, lambda_reg=0.1,
                         normalize=True, use_kdtree=True, k=10, radius_mode=False,
                         optimize_similarity=True, with_scale=True, w=0.02,
@@ -79,6 +79,7 @@ TY_atl, params_atl = atl.register()
 - `radius_mode`: optional radius gating in sparse E-step (off by default)
 - `w`: outlier weight (0 ≤ w < 1) in GMM
 - `normalize` (atlas): improves stability across scales
+- `mean_shape` (atlas): with `normalize=True`, pass `mean_shape` as `(M, D)`
 
 ## Acknowledgements
 - This work builds on the excellent original CPD implementation by Siavash Khallaghi and Anthony Gatti (`pycpd`, MIT-licensed) and the CPD method by Myronenko and Song.
