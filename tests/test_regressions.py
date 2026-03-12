@@ -1,7 +1,13 @@
 import numpy as np
 import pytest
 
-from biocpd import AffineRegistration, AtlasRegistration, RigidRegistration
+from biocpd import (
+    AffineRegistration,
+    AtlasRegistration,
+    ConstrainedDeformableRegistration,
+    DeformableRegistration,
+    RigidRegistration,
+)
 from biocpd.emregistration import initialize_sigma2
 
 
@@ -213,3 +219,254 @@ def test_atlas_float32_dtype_is_preserved_internals():
     assert reg.Y.dtype == np.float32
     assert reg.U_flat.dtype == np.float32
     assert reg.L.dtype == np.float32
+
+
+def test_deformable_defaults_to_float32_dtype():
+    rng = np.random.default_rng(24)
+    X = rng.normal(size=(12, 3))
+    Y = rng.normal(size=(12, 3))
+
+    reg = DeformableRegistration(
+        X=X,
+        Y=Y,
+        low_rank=False,
+        use_kdtree=False,
+        max_iterations=1,
+    )
+
+    assert reg.X.dtype == np.float32
+    assert reg.Y.dtype == np.float32
+    assert reg.W.dtype == np.float32
+
+
+def test_constrained_deformable_defaults_to_float32_dtype():
+    rng = np.random.default_rng(25)
+    X = rng.normal(size=(12, 3))
+    Y = rng.normal(size=(12, 3))
+
+    reg = ConstrainedDeformableRegistration(
+        X=X,
+        Y=Y,
+        source_id=np.array([0, 2, 4], dtype=int),
+        target_id=np.array([0, 2, 4], dtype=int),
+        low_rank=False,
+        use_kdtree=False,
+        max_iterations=1,
+    )
+
+    assert reg.X.dtype == np.float32
+    assert reg.Y.dtype == np.float32
+    assert reg.W.dtype == np.float32
+    assert reg.P_tilde.dtype == np.float32
+
+
+def test_atlas_defaults_to_float32_dtype():
+    X, Y, U, L = _atlas_inputs(seed=26)
+
+    reg = AtlasRegistration(
+        X=X,
+        Y=Y,
+        U=U,
+        eigenvalues=L,
+        use_kdtree=False,
+        max_iterations=1,
+    )
+
+    assert reg.X.dtype == np.float32
+    assert reg.Y.dtype == np.float32
+    assert reg.U_flat.dtype == np.float32
+    assert reg.L.dtype == np.float32
+
+
+def test_deformable_dense_stats_do_not_store_posterior_matrix():
+    rng = np.random.default_rng(41)
+    X = rng.normal(size=(9, 3))
+    Y = rng.normal(size=(7, 3))
+
+    reg = DeformableRegistration(
+        X=X,
+        Y=Y,
+        low_rank=False,
+        use_kdtree=False,
+        max_iterations=1,
+    )
+    reg.transform_point_cloud()
+    reg.expectation()
+
+    diff2 = np.sum((reg.X[None, :, :] - reg.TY[:, None, :]) ** 2, axis=2)
+    P = np.exp(-diff2 / (2 * reg.sigma2))
+    c = (2 * np.pi * reg.sigma2) ** (reg.D / 2) * reg.w / (1 - reg.w) * reg.M / reg.N
+    den = np.sum(P, axis=0, keepdims=True) + c
+    P /= den
+
+    assert reg.P is None
+    assert np.allclose(reg.Pt1, np.sum(P, axis=0), atol=1e-12, rtol=1e-12)
+    assert np.allclose(reg.P1, np.sum(P, axis=1), atol=1e-12, rtol=1e-12)
+    assert np.allclose(reg.PX, P @ reg.X, atol=1e-12, rtol=1e-12)
+    assert np.isclose(reg.Np, np.sum(P), atol=1e-12, rtol=1e-12)
+
+
+def test_constrained_deformable_dense_expectation_does_not_store_posterior_matrix():
+    rng = np.random.default_rng(42)
+    X = rng.normal(size=(8, 3))
+    Y = rng.normal(size=(8, 3))
+
+    reg = ConstrainedDeformableRegistration(
+        X=X,
+        Y=Y,
+        source_id=np.array([0, 3, 5], dtype=int),
+        target_id=np.array([0, 3, 5], dtype=int),
+        low_rank=False,
+        use_kdtree=False,
+        max_iterations=1,
+    )
+    reg.transform_point_cloud()
+    reg.expectation()
+
+    assert reg.P is None
+    assert reg.Pt1.shape == (reg.N,)
+    assert reg.P1.shape == (reg.M,)
+    assert reg.PX.shape == (reg.M, reg.D)
+    assert reg.Np > 0
+
+
+@pytest.mark.parametrize("low_rank", [False, True])
+def test_deformable_float32_dtype_is_preserved_internals(low_rank):
+    rng = np.random.default_rng(52)
+    X = rng.normal(size=(18, 3)).astype(np.float32)
+    Y = rng.normal(size=(18, 3)).astype(np.float32)
+
+    reg = DeformableRegistration(
+        X=X,
+        Y=Y,
+        low_rank=low_rank,
+        num_eig=6,
+        dtype=np.float32,
+        use_kdtree=False,
+        max_iterations=2,
+    )
+    TY, _ = reg.register()
+
+    assert TY.dtype == np.float32
+    assert reg.X.dtype == np.float32
+    assert reg.Y.dtype == np.float32
+    assert reg.TY.dtype == np.float32
+    assert reg.W.dtype == np.float32
+    if low_rank:
+        assert reg.Q.dtype == np.float32
+        assert reg.S.dtype == np.float32
+        assert reg.inv_S.dtype == np.float32
+    else:
+        assert reg.G.dtype == np.float32
+
+
+def test_constrained_deformable_float32_dtype_is_preserved_internals():
+    rng = np.random.default_rng(53)
+    X = rng.normal(size=(16, 3)).astype(np.float32)
+    Y = rng.normal(size=(16, 3)).astype(np.float32)
+
+    reg = ConstrainedDeformableRegistration(
+        X=X,
+        Y=Y,
+        source_id=np.array([0, 2, 4, 6], dtype=int),
+        target_id=np.array([0, 2, 4, 6], dtype=int),
+        low_rank=False,
+        dtype=np.float32,
+        use_kdtree=False,
+        max_iterations=2,
+    )
+    TY, _ = reg.register()
+
+    assert TY.dtype == np.float32
+    assert reg.X.dtype == np.float32
+    assert reg.Y.dtype == np.float32
+    assert reg.TY.dtype == np.float32
+    assert reg.W.dtype == np.float32
+    assert reg.P_tilde.dtype == np.float32
+
+
+@pytest.mark.parametrize("low_rank", [False, True])
+def test_deformable_float32_matches_float64_accuracy(low_rank):
+    rng = np.random.default_rng(7 if low_rank else 5)
+    M, D = 36, 3
+    Y0 = rng.normal(size=(M, D))
+    W_true = 0.08 * rng.normal(size=(M, D))
+    X = Y0 + W_true + 0.01 * rng.normal(size=(M, D))
+
+    common_kwargs = dict(
+        alpha=2.0,
+        beta=2.0,
+        low_rank=low_rank,
+        num_eig=10,
+        use_kdtree=False,
+        max_iterations=15,
+        tolerance=1e-6,
+    )
+
+    reg64 = DeformableRegistration(
+        X=X.astype(np.float64),
+        Y=Y0.astype(np.float64),
+        dtype=np.float64,
+        **common_kwargs,
+    )
+    TY64, params64 = reg64.register()
+
+    reg32 = DeformableRegistration(
+        X=X.astype(np.float32),
+        Y=Y0.astype(np.float32),
+        dtype=np.float32,
+        **common_kwargs,
+    )
+    TY32, params32 = reg32.register()
+
+    TY_delta = TY64 - TY32.astype(np.float64)
+    W64 = params64[-1].astype(np.float64)
+    W32 = params32[-1].astype(np.float64)
+
+    assert np.sqrt(np.mean(TY_delta * TY_delta)) < 5e-5
+    assert np.max(np.abs(TY_delta)) < 1e-4
+    assert abs(float(reg64.sigma2) - float(reg32.sigma2)) < 1e-5
+    assert np.sqrt(np.mean((W64 - W32) ** 2)) < 1e-3
+
+
+def test_atlas_float32_matches_float64_accuracy():
+    X, Y, U, L = _atlas_inputs(seed=17)
+
+    reg64 = AtlasRegistration(
+        X=X.astype(np.float64),
+        Y=Y.astype(np.float64),
+        U=U.astype(np.float64),
+        eigenvalues=L.astype(np.float64),
+        normalize=True,
+        use_kdtree=False,
+        optimize_similarity=True,
+        with_scale=True,
+        dtype=np.float64,
+        max_iterations=15,
+        tolerance=1e-6,
+    )
+    TY64, params64 = reg64.register()
+
+    reg32 = AtlasRegistration(
+        X=X.astype(np.float32),
+        Y=Y.astype(np.float32),
+        U=U.astype(np.float32),
+        eigenvalues=L.astype(np.float32),
+        normalize=True,
+        use_kdtree=False,
+        optimize_similarity=True,
+        with_scale=True,
+        dtype=np.float32,
+        max_iterations=15,
+        tolerance=1e-6,
+    )
+    TY32, params32 = reg32.register()
+
+    TY_delta = TY64 - TY32.astype(np.float64)
+    b64 = params64["b"].astype(np.float64)
+    b32 = params32["b"].astype(np.float64)
+
+    assert np.sqrt(np.mean(TY_delta * TY_delta)) < 1e-5
+    assert np.max(np.abs(TY_delta)) < 5e-5
+    assert abs(float(reg64.sigma2) - float(reg32.sigma2)) < 1e-5
+    assert np.sqrt(np.mean((b64 - b32) ** 2)) < 1e-4

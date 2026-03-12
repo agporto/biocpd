@@ -44,7 +44,7 @@ class ConstrainedDeformableRegistration(DeformableRegistration):
         self.e_alpha = 1e-8 if e_alpha is None else e_alpha
         self.source_id = source_id
         self.target_id = target_id
-        self.P_tilde = np.zeros((self.M, self.N))
+        self.P_tilde = np.zeros((self.M, self.N), dtype=self.dtype)
         self.P_tilde[self.source_id, self.target_id] = 1
         self.P1_tilde = np.sum(self.P_tilde, axis=1)
         self.PX_tilde = np.dot(self.P_tilde, self.X)
@@ -57,7 +57,7 @@ class ConstrainedDeformableRegistration(DeformableRegistration):
         if self.low_rank is False:
             # A = (diag(P1) + sigma2/e_alpha * diag(P1_tilde)) G + alpha*sigma2*I
             wv = self.P1 + (self.sigma2 * (1.0 / self.e_alpha)) * self.P1_tilde  # (M,)
-            A = (wv[:, None] * self.G) + (self.alpha * self.sigma2) * np.eye(self.M)
+            A = (wv[:, None] * self.G) + (self.alpha * self.sigma2) * np.eye(self.M, dtype=self.dtype)
             # B = PX - diag(P1)Y + sigma2/e_alpha * (PX_tilde - diag(P1_tilde)Y)
             B = self.PX - (self.P1[:, None] * self.Y) + (self.sigma2 * (1.0 / self.e_alpha)) * (self.PX_tilde - (self.P1_tilde[:, None] * self.Y))
             self.W = np.linalg.solve(A, B)

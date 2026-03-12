@@ -78,6 +78,7 @@ TY_atl, params_atl = atl.register()
 - `low_rank`, `num_eig` (deformable): low-rank kernel for fast M-step
 - `radius_mode`: optional radius gating in sparse E-step (off by default)
 - `w`: outlier weight (0 ≤ w < 1) in GMM
+- `dtype` (deformable, constrained deformable, atlas): defaults to `np.float32`; set `dtype=np.float64` when you need the extra precision
 - `normalize` (atlas): improves stability across scales
 - `mean_shape` (atlas): with `normalize=True`, pass `mean_shape` as `(M, D)`
 

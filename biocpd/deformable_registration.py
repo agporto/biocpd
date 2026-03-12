@@ -36,6 +36,8 @@ class DeformableRegistration(EMRegistration):
         If True, in sparse E-step ignore neighbors beyond a numerically safe radius.
     w: float
         Outlier weight (0 <= w < 1) forwarded to EM base.
+    dtype: numpy dtype
+        Floating-point dtype used for internal arrays. Defaults to float32.
     """
 
     def __init__(self,
@@ -70,7 +72,10 @@ class DeformableRegistration(EMRegistration):
             If True, mask neighbors beyond sigma-derived radius in sparse E-step.
         w: float, optional
             Outlier weight in [0,1). Forwarded to EM base.
+        dtype: numpy dtype, optional
+            Floating-point dtype for internal arrays. Defaults to float32.
         """
+        kwargs.setdefault("dtype", np.float32)
         super().__init__(w=w, *args, **kwargs)
         if alpha is not None and (not isinstance(alpha, numbers.Number) or alpha <= 0):
             raise ValueError(f"alpha must be a positive number, but got {alpha}")
@@ -81,7 +86,7 @@ class DeformableRegistration(EMRegistration):
         self.beta = 2.0 if beta is None else beta
         self.low_rank = low_rank
         self.num_eig = num_eig
-        self.W = np.zeros((self.M, self.D))
+        self.W = np.zeros((self.M, self.D), dtype=self.dtype)
 
         # Pre-compute Gaussian kernel or its low-rank approximation.
         if self.low_rank:
@@ -94,32 +99,43 @@ class DeformableRegistration(EMRegistration):
             self.G = gaussian_kernel(self.Y, self.beta)
 
         # K-D tree setup for accelerated E-step.
-        self.use_kdtree = use_kdtree
+        self.use_kdtree = bool(use_kdtree)
         self.radius_mode = bool(radius_mode)
         if self.use_kdtree:
-            self.k = k
+            self.k = max(1, min(int(k), self.N))
             self.kdtree = cKDTree(self.X)
 
     def expectation(self):
         """Compute E-step; optionally k-NN sparse with radius gating."""
         if self.use_kdtree:
             distances, indices = self.kdtree.query(self.TY, k=self.k)
-            distances = np.clip(distances, np.finfo(self.X.dtype).eps, None)
+            if distances.ndim == 1:
+                distances = distances[:, None]
+                indices = indices[:, None]
+            distances = np.asarray(distances, dtype=self.dtype, order="C")
+            indices = np.asarray(indices, dtype=np.int64, order="C")
+            distances = np.clip(distances, np.finfo(self.dtype).eps, None)
 
             # mask invalid neighbors
             mask = np.isfinite(distances)
-            if distances.ndim == 1:
-                distances = distances[:, None]; indices = indices[:, None]; mask = mask[:, None]
             # Optional radius gating
             if self.radius_mode:
-                rad = float(np.sqrt(-2.0 * self.sigma2 * np.log(np.finfo(self.X.dtype).eps)))
+                rad = float(np.sqrt(-2.0 * self.sigma2 * np.log(np.finfo(self.dtype).eps)))
                 mask = mask & (distances <= rad)
 
             if not mask.any():
                 # fall back to dense if no valid sparse candidates
                 return super().expectation()
 
-            P_vals = np.exp(-(np.minimum(distances, np.sqrt(-2.0 * self.sigma2 * np.log(np.finfo(self.X.dtype).eps))) ** 2) / (2 * self.sigma2))
+            P_vals = np.exp(
+                -(
+                    np.minimum(
+                        distances,
+                        np.sqrt(-2.0 * self.sigma2 * np.log(np.finfo(self.dtype).eps)),
+                    ) ** 2
+                )
+                / (2 * self.sigma2)
+            )
 
             rows = np.arange(self.M).repeat(self.k)
             rows = rows[mask.ravel()]
@@ -137,8 +153,8 @@ class DeformableRegistration(EMRegistration):
 
             # Outlier term and column normalization
             c_term = (2 * np.pi * self.sigma2)**(self.D / 2) * self.w / (1 - self.w) * self.M / self.N
-            den_col = np.array(P_sparse.sum(axis=0)).ravel() + c_term
-            den_col = np.clip(den_col, np.finfo(self.X.dtype).eps, None)
+            den_col = np.array(P_sparse.sum(axis=0), dtype=self.dtype).ravel() + c_term
+            den_col = np.clip(den_col, np.finfo(self.dtype).eps, None)
             inv_den_col = 1.0 / den_col
 
             self.P = P_sparse.multiply(inv_den_col[np.newaxis, :])
@@ -147,7 +163,7 @@ class DeformableRegistration(EMRegistration):
             self.Np = self.P1.sum()
             self.PX = self.P @ self.X
         else:
-            super().expectation()
+            self._compute_dense_posterior_stats(store_p=False)
 
     def update_transform(self):
         """
@@ -158,7 +174,7 @@ class DeformableRegistration(EMRegistration):
         efficiently. Otherwise, it solves the full-rank system directly.
         """
         if not self.low_rank:
-            A = (self.P1[:, None] * self.G) + self.alpha * self.sigma2 * np.eye(self.M)
+            A = (self.P1[:, None] * self.G) + self.alpha * self.sigma2 * np.eye(self.M, dtype=self.dtype)
             B = self.PX - (self.P1[:, None] * self.Y)
             self.W = np.linalg.solve(A, B)
         else:
@@ -166,7 +182,7 @@ class DeformableRegistration(EMRegistration):
             # The system is (diag(P1)QSQ' + lambda*I)W = F, where lambda = alpha*sigma^2.
             # The solution is W = (1/lambda) * (F - DQ(lambda*S^-1 + Q'DQ)^-1 * Q'F).
             # The following code implements this solution.
-            lambda_val = self.alpha * self.sigma2
+            lambda_val = self.dtype.type(self.alpha * self.sigma2)
             F = self.PX - (self.P1[:, np.newaxis] * self.Y)
             
             # Mmat = (lambda*S^-1 + Q'DQ)

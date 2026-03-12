@@ -82,7 +82,7 @@ class AtlasRegistration(EMRegistration):
                  with_scale: bool = True,
                  radius_mode: bool = False,
                  w: float = 0.0,
-                 dtype: np.dtype = np.float64,
+                 dtype: np.dtype = np.float32,
                  **kwargs: Any) -> None:
         dtype = np.dtype(dtype)
         if not np.issubdtype(dtype, np.floating):
