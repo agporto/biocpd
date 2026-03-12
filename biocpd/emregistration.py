@@ -102,7 +102,7 @@ class EMRegistration(object):
     """
 
     def __init__(self, X, Y, sigma2=None, max_iterations=None, tolerance=None,
-                 w=None, dense_block_size=None, *args, **kwargs):
+                 w=None, dense_block_size=None, dtype=np.float64, *args, **kwargs):
         if type(X) is not np.ndarray or X.ndim != 2:
             raise ValueError(
                 "The target point cloud (X) must be at a 2D numpy array.")
@@ -144,9 +144,16 @@ class EMRegistration(object):
             warn("Received a non-integer value for dense_block_size: {}. Casting to integer.".format(dense_block_size))
             dense_block_size = int(dense_block_size)
 
+        dtype = np.dtype(dtype)
+        if not np.issubdtype(dtype, np.floating):
+            raise ValueError(
+                "Expected dtype to be a floating-point type, instead got: {}".format(dtype)
+            )
+
         # Use floating point internally for numerically stable EM updates.
-        self.X = np.asarray(X, dtype=float)
-        self.Y = np.asarray(Y, dtype=float)
+        self.dtype = dtype
+        self.X = np.asarray(X, dtype=self.dtype)
+        self.Y = np.asarray(Y, dtype=self.dtype)
         self.TY = self.Y.copy()
         self.sigma2 = initialize_sigma2(self.X, self.Y) if sigma2 is None else sigma2
         (self.N, self.D) = self.X.shape
@@ -163,7 +170,7 @@ class EMRegistration(object):
         self.PX = np.zeros((self.M, self.D))
         self.Np = 0
         self.X_sq = np.sum(self.X * self.X, axis=1)
-        self._tiny = np.finfo(float).tiny
+        self._tiny = np.finfo(self.dtype).tiny
         self.dense_block_size = dense_block_size
 
     def register(self, callback=lambda **kwargs: None):
@@ -242,20 +249,20 @@ class EMRegistration(object):
 
         # Target roughly 128 MiB across the main dense work buffers.
         target_bytes = 128 * 1024 * 1024
-        bytes_per_column = max(self.M, 1) * np.dtype(float).itemsize * 3
+        bytes_per_column = max(self.M, 1) * np.dtype(self.dtype).itemsize * 3
         auto_block = max(1, target_bytes // max(bytes_per_column, 1))
         return min(self.N, max(128, int(auto_block)))
 
     def _compute_dense_posterior_stats(self, store_p=True, TY=None, block_size=None):
-        TY_arr = self.TY if TY is None else np.asarray(TY, dtype=float)
+        TY_arr = self.TY if TY is None else np.asarray(TY, dtype=self.dtype)
         ty_sq = np.sum(TY_arr * TY_arr, axis=1)[:, None]
         block_size = self._get_dense_block_size() if block_size is None else max(1, min(int(block_size), self.N))
         c = (2 * np.pi * self.sigma2) ** (self.D / 2) * self.w / (1.0 - self.w) * self.M / self.N
 
-        P = np.empty((self.M, self.N), dtype=float) if store_p else None
-        Pt1 = np.zeros((self.N,), dtype=float)
-        P1 = np.zeros((self.M,), dtype=float)
-        PX = np.zeros((self.M, self.D), dtype=float)
+        P = np.empty((self.M, self.N), dtype=self.dtype) if store_p else None
+        Pt1 = np.zeros((self.N,), dtype=self.dtype)
+        P1 = np.zeros((self.M,), dtype=self.dtype)
+        PX = np.zeros((self.M, self.D), dtype=self.dtype)
 
         for start in range(0, self.N, block_size):
             stop = min(start + block_size, self.N)
