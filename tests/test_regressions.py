@@ -66,6 +66,11 @@ def _bruteforce_sigma2(X, Y):
     return float(np.sum(diff * diff) / (X.shape[1] * X.shape[0] * Y.shape[0]))
 
 
+def _dtype_tolerance(dtype):
+    dtype = np.dtype(dtype)
+    return 1e-6 if dtype == np.float32 else 1e-12
+
+
 def test_atlas_rejects_zero_kdtree_radius_scale():
     X, Y, U, L = _atlas_inputs()
     with pytest.raises(ValueError, match="kdtree_radius_scale must be a positive number"):
@@ -168,12 +173,13 @@ def test_atlas_dense_blocked_stats_match_reference():
     P1_ref = np.sum(P, axis=1)
     PX_ref = P @ reg.X
     Np_ref = float(np.sum(P1_ref))
+    tol = _dtype_tolerance(reg.X.dtype)
 
     assert reg.P is None
-    assert np.allclose(reg.Pt1, Pt1_ref, atol=1e-12, rtol=1e-12)
-    assert np.allclose(reg.P1, P1_ref, atol=1e-12, rtol=1e-12)
-    assert np.allclose(reg.PX, PX_ref, atol=1e-12, rtol=1e-12)
-    assert np.isclose(reg.Np, Np_ref, atol=1e-12, rtol=1e-12)
+    assert np.allclose(reg.Pt1, Pt1_ref, atol=tol, rtol=tol)
+    assert np.allclose(reg.P1, P1_ref, atol=tol, rtol=tol)
+    assert np.allclose(reg.PX, PX_ref, atol=tol, rtol=tol)
+    assert np.isclose(reg.Np, Np_ref, atol=tol, rtol=tol)
 
 
 def test_atlas_default_dense_block_size_targets_5000():
@@ -298,12 +304,13 @@ def test_deformable_dense_stats_do_not_store_posterior_matrix():
     c = (2 * np.pi * reg.sigma2) ** (reg.D / 2) * reg.w / (1 - reg.w) * reg.M / reg.N
     den = np.sum(P, axis=0, keepdims=True) + c
     P /= den
+    tol = _dtype_tolerance(reg.X.dtype)
 
     assert reg.P is None
-    assert np.allclose(reg.Pt1, np.sum(P, axis=0), atol=1e-12, rtol=1e-12)
-    assert np.allclose(reg.P1, np.sum(P, axis=1), atol=1e-12, rtol=1e-12)
-    assert np.allclose(reg.PX, P @ reg.X, atol=1e-12, rtol=1e-12)
-    assert np.isclose(reg.Np, np.sum(P), atol=1e-12, rtol=1e-12)
+    assert np.allclose(reg.Pt1, np.sum(P, axis=0), atol=tol, rtol=tol)
+    assert np.allclose(reg.P1, np.sum(P, axis=1), atol=tol, rtol=tol)
+    assert np.allclose(reg.PX, P @ reg.X, atol=tol, rtol=tol)
+    assert np.isclose(reg.Np, np.sum(P), atol=tol, rtol=tol)
 
 
 def test_constrained_deformable_dense_expectation_does_not_store_posterior_matrix():
