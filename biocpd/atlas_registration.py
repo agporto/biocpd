@@ -188,14 +188,14 @@ class AtlasRegistration(EMRegistration):
 
     def _accumulate_sparse_stats(self, rows: np.ndarray, cols: np.ndarray, weights: np.ndarray) -> None:
         c = (2 * np.pi * self.sigma2) ** (self.D / 2) * self.w / (1 - self.w) * self.M / self.N
-        den = np.bincount(cols, weights=weights, minlength=self.N).astype(float, copy=False)
+        den = np.bincount(cols, weights=weights, minlength=self.N).astype(self.dtype, copy=False)
         den += c
         np.maximum(den, self._tiny, out=den)
 
-        norm_weights = weights / den[cols]
+        norm_weights = (weights / den[cols]).astype(self.dtype, copy=False)
         self.P = csr_matrix((norm_weights, (rows, cols)), shape=(self.M, self.N)) if self.store_posterior else None
-        self.Pt1 = np.bincount(cols, weights=norm_weights, minlength=self.N)
-        self.P1 = np.bincount(rows, weights=norm_weights, minlength=self.M)
+        self.Pt1 = np.bincount(cols, weights=norm_weights, minlength=self.N).astype(self.dtype, copy=False)
+        self.P1 = np.bincount(rows, weights=norm_weights, minlength=self.M).astype(self.dtype, copy=False)
         self.Np = float(self.P1.sum())
 
         PX = np.empty((self.M, self.D), dtype=self.dtype)
@@ -266,7 +266,7 @@ class AtlasRegistration(EMRegistration):
 
     def update_transform(self) -> None:
         tiny = np.finfo(self.dtype).tiny
-        self.P1_ext[:] = np.repeat(self.P1, self.D)
+        self.P1_ext.reshape(self.M, self.D)[:] = self.P1[:, None]
         P1_safe = np.maximum(self.P1, tiny)[:,None]
         xbar = self.PX / P1_safe
         ix = self._inverse_similarity(xbar)
