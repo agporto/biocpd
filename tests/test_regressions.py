@@ -227,6 +227,60 @@ def test_atlas_float32_dtype_is_preserved_internals():
     assert reg.L.dtype == np.float32
 
 
+def test_atlas_sparse_estep_preserves_float32_dtype():
+    X, Y, U, L = _atlas_inputs(seed=123)
+    reg = AtlasRegistration(
+        X=X.astype(np.float32),
+        Y=Y.astype(np.float32),
+        U=U.astype(np.float32),
+        eigenvalues=L.astype(np.float32),
+        dtype=np.float32,
+        use_kdtree=True,
+        k=4,
+        kdtree_radius_scale=1e-6,
+        max_iterations=1,
+    )
+    reg.transform_point_cloud()
+    reg.expectation()
+
+    assert reg._use_sparse is True
+    assert reg.P1.dtype == np.float32
+    assert reg.Pt1.dtype == np.float32
+    assert reg.PX.dtype == np.float32
+
+
+def test_atlas_sparse_full_neighbors_matches_dense_pipeline_accuracy():
+    X, Y, U, L = _atlas_inputs(seed=202)
+    kwargs = dict(
+        X=X.astype(np.float32),
+        Y=Y.astype(np.float32),
+        U=U.astype(np.float32),
+        eigenvalues=L.astype(np.float32),
+        dtype=np.float32,
+        max_iterations=6,
+        tolerance=1e-8,
+    )
+
+    dense = AtlasRegistration(
+        **kwargs,
+        use_kdtree=False,
+    )
+    TY_dense, _ = dense.register()
+
+    sparse = AtlasRegistration(
+        **kwargs,
+        use_kdtree=True,
+        k=kwargs["X"].shape[0],
+        kdtree_radius_scale=1e-6,
+        radius_mode=False,
+    )
+    TY_sparse, _ = sparse.register()
+
+    assert sparse._use_sparse is True
+    assert np.allclose(TY_sparse, TY_dense, atol=5e-5, rtol=5e-5)
+    assert np.isclose(sparse.sigma2, dense.sigma2, atol=5e-6, rtol=5e-5)
+
+
 def test_deformable_defaults_to_float32_dtype():
     rng = np.random.default_rng(24)
     X = rng.normal(size=(12, 3))
