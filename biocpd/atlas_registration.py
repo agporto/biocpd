@@ -136,7 +136,7 @@ class AtlasRegistration(EMRegistration):
             self.Y = self.mean_shape.copy()
         else: self.mean_shape = None
 
-        self.L = (ev/(self.target_scale*self.target_scale)).copy() if self.normalize else ev.copy()
+        self.L = ev.copy()
         if self.L.shape != (self.K,): raise ValueError("eigenvalues has an invalid shape.")
         self.L = np.asarray(self.L, dtype=self.dtype)
         floor = max(1e-12, np.finfo(self.dtype).eps)
@@ -255,9 +255,10 @@ class AtlasRegistration(EMRegistration):
         C = (Yc.T * w).dot(Xc)
         U, S, Vt = np.linalg.svd(C, full_matrices=False)
         M = np.eye(self.D, dtype=self.dtype); M[-1,-1] = np.sign(np.linalg.det(U@Vt))
-        R = U @ M @ Vt
+        A = U @ M @ Vt
+        R = A.T
         if self.with_scale:
-            num = np.trace(R.T @ C)
+            num = np.trace(A.T @ C)
             den = float((w * (Yc*Yc).sum(axis=1)).sum()); s = float(num / max(den, tiny))
         else:
             s = self.dtype.type(1.0)
@@ -308,8 +309,30 @@ class AtlasRegistration(EMRegistration):
         self.sigma_diff = abs(self.sigma2 - old)
         self.diff = max(self.sigma_diff / (self.sigma2 + 1e-8), getattr(self, "b_diff", 0.0))
 
+    def _world_similarity_parameters(self) -> Tuple[np.ndarray, float, np.ndarray]:
+        if not self.normalize:
+            return self.R, self.s, self.t
+        c = self.target_centroid
+        t_world = -self.s * (c @ self.R.T) + self.target_scale * self.t + c
+        return self.R, self.s, np.asarray(t_world, dtype=self.dtype).reshape(1, self.D)
+
     def get_registration_parameters(self) -> Dict[str, Any]:
-        return {"U_flat": self.U_flat, "b": self.b, "R": self.R, "s": self.s, "t": self.t}
+        R_world, s_world, t_world = self._world_similarity_parameters()
+        return {
+            "U_flat": self.U_flat,
+            "b": self.b,
+            # Backward-compatible aliases. With normalize=True these are internal
+            # normalized-space similarity parameters.
+            "R": self.R,
+            "s": self.s,
+            "t": self.t,
+            "R_norm": self.R,
+            "s_norm": self.s,
+            "t_norm": self.t,
+            "R_world": R_world,
+            "s_world": s_world,
+            "t_world": t_world,
+        }
 
     def transformed_points(self, denormalize: bool = True) -> np.ndarray:
         Yb = self.Y + self._deformation

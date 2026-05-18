@@ -138,6 +138,103 @@ def test_atlas_normalized_matrix_mean_shape_runs():
     assert TY.shape == Y.shape
 
 
+def test_atlas_similarity_update_recovers_known_row_vector_transform():
+    rng = np.random.default_rng(77)
+    M, D, K = 50, 3, 1
+    Y = rng.normal(size=(M, D))
+    U = np.zeros((M * D, K))
+    L = np.ones(K)
+
+    theta = 0.45
+    R_true = np.array(
+        [
+            [np.cos(theta), -np.sin(theta), 0.0],
+            [np.sin(theta), np.cos(theta), 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+    scale_true = 1.3
+    t_true = np.array([[0.25, -0.4, 0.15]])
+    X = scale_true * (Y @ R_true.T) + t_true
+
+    reg = AtlasRegistration(
+        X=X,
+        Y=Y,
+        U=U,
+        eigenvalues=L,
+        normalize=False,
+        use_kdtree=False,
+        optimize_similarity=True,
+        with_scale=True,
+        dtype=np.float64,
+        max_iterations=1,
+    )
+    reg.P1 = np.ones(M, dtype=np.float64)
+    reg.PX = X.copy()
+    reg.Np = float(M)
+
+    R, s, t = reg._weighted_similarity_update(Y, xbar=X)
+    TY = s * (Y @ R.T) + t
+
+    assert np.allclose(R, R_true, atol=1e-12, rtol=1e-12)
+    assert np.isclose(s, scale_true, atol=1e-12, rtol=1e-12)
+    assert np.allclose(t, t_true, atol=1e-12, rtol=1e-12)
+    assert np.sqrt(np.mean((TY - X) ** 2)) < 1e-12
+
+
+def test_atlas_normalize_keeps_pca_score_eigenvalues_in_original_units():
+    X, Y, U, L = _atlas_inputs(seed=88)
+    reg = AtlasRegistration(
+        X=X,
+        Y=Y,
+        U=U,
+        eigenvalues=L,
+        normalize=True,
+        use_kdtree=False,
+        dtype=np.float64,
+        max_iterations=1,
+    )
+
+    assert np.allclose(reg.U_flat, U / reg.target_scale)
+    assert np.allclose(reg.L, L)
+
+
+def test_atlas_registration_parameters_include_world_similarity_when_normalized():
+    X, Y, U, L = _atlas_inputs(seed=89)
+    reg = AtlasRegistration(
+        X=X,
+        Y=Y,
+        U=U,
+        eigenvalues=L,
+        normalize=True,
+        use_kdtree=False,
+        dtype=np.float64,
+        max_iterations=1,
+    )
+
+    theta = -0.25
+    reg.R = np.array(
+        [
+            [np.cos(theta), -np.sin(theta), 0.0],
+            [np.sin(theta), np.cos(theta), 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    reg.s = 1.2
+    reg.t = np.array([[0.2, -0.1, 0.05]], dtype=np.float64)
+
+    params = reg.get_registration_parameters()
+    TY_norm = reg._apply_similarity(reg.Y)
+    TY_world_from_internal = reg._denormalize(TY_norm)
+    TY_world_from_params = params["s_world"] * (Y @ params["R_world"].T) + params["t_world"]
+
+    assert np.allclose(params["R_norm"], reg.R)
+    assert np.isclose(params["s_norm"], reg.s)
+    assert np.allclose(params["t_norm"], reg.t)
+    assert np.allclose(TY_world_from_params, TY_world_from_internal)
+
+
 def test_initialize_sigma2_matches_bruteforce():
     rng = np.random.default_rng(99)
     X = rng.normal(size=(9, 3))
