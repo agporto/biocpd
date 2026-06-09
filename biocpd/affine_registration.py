@@ -143,10 +143,24 @@ class AffineRegistration(EMRegistration):
         trAB = np.trace(np.dot(self.A, self.B))
         xPx = np.dot(np.transpose(self.Pt1), np.sum(
             np.multiply(self.X_hat, self.X_hat), axis=1))
-        trBYPYP = np.trace(np.dot(np.dot(self.B, self.YPY), self.B))
+        # Expanding sum_{m,n} P[m,n] || x_hat_n - y_hat_m B ||^2 gives the
+        # quadratic term tr(B YPY B^T) (equivalently tr(B B^T YPY)). The earlier
+        # tr(B YPY B) is only valid when B is symmetric, which an affine map is
+        # not in general, so the reported objective q (and the convergence
+        # metric diff that depends on it) was wrong. The B, t, and sigma2
+        # estimates are unaffected because the sigma2 update below uses the
+        # correct (xPx - tr(AB)) numerator.
+        trBYPYP = np.trace(np.dot(np.dot(self.B, self.YPY), self.B.T))
         self.q = (xPx - 2 * trAB + trBYPYP) / (2 * self.sigma2) + \
             self.D * self.Np/2 * np.log(self.sigma2)
-        self.diff = np.abs(self.q - qprev)
+        # Use a scale-invariant convergence test. q has magnitude O(Np * D),
+        # so comparing the raw absolute delta |q - qprev| against an absolute
+        # tolerance makes the stopping point depend on problem scale and never
+        # trips for large point clouds. Normalizing by |q| compares a relative
+        # change instead. (The previous code paired an absolute delta with the
+        # incorrect tr(B YPY B) term; correcting the term alone would leave the
+        # loop running to max_iterations at typical tolerances.)
+        self.diff = np.abs(self.q - qprev) / max(np.abs(self.q), 1.0)
 
         self.sigma2 = (xPx - trAB) / (self.Np * self.D)
 
