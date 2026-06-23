@@ -65,7 +65,7 @@ M, D, K = 200, 3, 12
 mean_shape = rng.normal(size=(M, D))
 U = rng.normal(size=(M*D, K))
 L = np.abs(rng.normal(size=(K,))) + 1e-1
-atl = AtlasRegistration(X=X, Y=mean_shape, mean_shape=mean_shape,
+atl = AtlasRegistration(X=X, Y=mean_shape, mean_shape=None,
                         U=U, eigenvalues=L, lambda_reg=0.1,
                         normalize=True, use_kdtree=True, k=10, radius_mode=False,
                         optimize_similarity=True, with_scale=True, w=0.02,
