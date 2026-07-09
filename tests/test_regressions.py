@@ -378,6 +378,55 @@ def test_atlas_sparse_full_neighbors_matches_dense_pipeline_accuracy():
     assert np.isclose(sparse.sigma2, dense.sigma2, atol=5e-6, rtol=5e-5)
 
 
+def test_atlas_shape_posterior_exposes_coefficient_and_point_uncertainty():
+    X, Y, U, L = _atlas_inputs(seed=303)
+    reg = AtlasRegistration(
+        X=X,
+        Y=Y,
+        U=U,
+        eigenvalues=L,
+        normalize=False,
+        use_kdtree=False,
+        optimize_similarity=False,
+        dtype=np.float64,
+        max_iterations=3,
+    )
+    _, params = reg.register()
+    posterior = reg.shape_posterior()
+
+    assert posterior["mean"].shape == (reg.K, 1)
+    assert posterior["precision"].shape == (reg.K, reg.K)
+    assert posterior["covariance"].shape == (reg.K, reg.K)
+    assert posterior["pointwise_variance"].shape == (reg.M, reg.D)
+    assert np.allclose(posterior["covariance"], posterior["covariance"].T, atol=1e-10)
+    assert np.all(np.linalg.eigvalsh(posterior["covariance"]) > 0)
+    assert np.all(posterior["pointwise_variance"] >= 0)
+    assert params["b_covariance"].shape == (reg.K, reg.K)
+    assert params["diagnostics"]["Np"] > 0
+    assert params["diagnostics"]["pointwise_variance_max"] >= params["diagnostics"]["pointwise_variance_mean"]
+
+
+def test_atlas_pointwise_variance_world_units_scale_when_normalized():
+    X, Y, U, L = _atlas_inputs(seed=304)
+    reg = AtlasRegistration(
+        X=X,
+        Y=Y,
+        U=U,
+        eigenvalues=L,
+        normalize=True,
+        use_kdtree=False,
+        optimize_similarity=False,
+        dtype=np.float64,
+        max_iterations=2,
+    )
+    reg.register()
+
+    normalized_var = reg.pointwise_variance(world_units=False)
+    world_var = reg.pointwise_variance(world_units=True)
+
+    assert np.allclose(world_var, normalized_var * reg.target_scale**2)
+    assert reg.shape_posterior(world_units=True)["pointwise_variance"].shape == (reg.M, reg.D)
+
 def test_deformable_defaults_to_float32_dtype():
     rng = np.random.default_rng(24)
     X = rng.normal(size=(12, 3))

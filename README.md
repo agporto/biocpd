@@ -81,6 +81,10 @@ TY_atl, params_atl = atl.register()
 - `dtype` (deformable, constrained deformable, atlas): defaults to `np.float32`; set `dtype=np.float64` when you need the extra precision
 - `normalize` (atlas): improves stability across scales
 - `mean_shape` (atlas): with `normalize=True`, pass `mean_shape` as `(M, D)`
+- Atlas registrations expose uncertainty helpers: `shape_posterior()` returns a
+  Laplace-style coefficient covariance and `pointwise_variance()` projects that
+  uncertainty back onto atlas points. Returned atlas params also include
+  `b_covariance`, `b_precision`, `pointwise_variance`, and scalar `diagnostics`.
 
 ## Acknowledgements
 - This work builds on the excellent original CPD implementation by Siavash Khallaghi and Anthony Gatti (`pycpd`, MIT-licensed) and the CPD method by Myronenko and Song.

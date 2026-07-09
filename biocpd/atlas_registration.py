@@ -160,6 +160,11 @@ class AtlasRegistration(EMRegistration):
         self.P1_ext = np.empty(self.MD, dtype=self.dtype); self.WU = np.empty((self.MD, self.K), dtype=self.dtype)
         self.b = np.zeros((self.K, 1), dtype=self.dtype); self.prev_b = self.b.copy()
         self._deformation = np.zeros((self.M, self.D), dtype=self.dtype)
+        self._b_precision = np.diag(self.lambda_reg * self.invL).astype(self.dtype, copy=False)
+        self._b_covariance = np.diag(self.L / max(self.lambda_reg, np.finfo(self.dtype).eps)).astype(self.dtype, copy=False)
+        self._pointwise_variance = np.einsum(
+            "ik,kl,il->i", self.U_flat, self._b_covariance, self.U_flat
+        ).reshape(self.M, self.D)
 
     def _denormalize(self, pts: np.ndarray) -> np.ndarray:
         return pts*self.target_scale + self.target_centroid if self.normalize else pts
@@ -185,6 +190,7 @@ class AtlasRegistration(EMRegistration):
         # Atlas update_transform already computes the new transformed points.
         self.update_transform()
         self.update_variance()
+        self._update_shape_posterior_uncertainty()
 
     def _accumulate_sparse_stats(self, rows: np.ndarray, cols: np.ndarray, weights: np.ndarray) -> None:
         c = (2 * np.pi * self.sigma2) ** (self.D / 2) * self.w / (1 - self.w) * self.M / self.N
@@ -265,6 +271,37 @@ class AtlasRegistration(EMRegistration):
         t = mu_x - s*(mu_y @ R.T)
         return R, s, t
 
+    def _coefficient_precision_matrix(self) -> np.ndarray:
+        """Return the local Gaussian posterior precision for atlas coefficients."""
+        tiny = np.finfo(self.dtype).tiny
+        self.P1_ext.reshape(self.M, self.D)[:] = self.P1[:, None]
+        self.WU[:] = self.U_flat * self.P1_ext[:, None]
+        A = self.U_flat.T.dot(self.WU)
+        s_for_prior = self.s if self.with_scale else 1.0
+        prior_scale = self.lambda_reg * self.sigma2 / max(s_for_prior**2, tiny)
+        A[self._diag_idx] += prior_scale * self.invL
+        return A
+
+    def _update_shape_posterior_uncertainty(self) -> None:
+        """Update a Laplace-style covariance approximation for atlas scores."""
+        A = self._coefficient_precision_matrix()
+        try:
+            c, low = cho_factor(A, overwrite_a=False, check_finite=False)
+            eye = np.eye(self.K, dtype=self.dtype)
+            A_inv = cho_solve((c, low), eye, overwrite_b=False, check_finite=False)
+        except np.linalg.LinAlgError:
+            jitter = np.finfo(self.dtype).eps * max(float(np.trace(A)) / max(self.K, 1), 1.0)
+            A[self._diag_idx] += jitter
+            c, low = cho_factor(A, overwrite_a=False, check_finite=False)
+            eye = np.eye(self.K, dtype=self.dtype)
+            A_inv = cho_solve((c, low), eye, overwrite_b=False, check_finite=False)
+
+        self._b_precision = A
+        self._b_covariance = (self.sigma2 * A_inv).astype(self.dtype, copy=False)
+        self._pointwise_variance = np.einsum(
+            "ik,kl,il->i", self.U_flat, self._b_covariance, self.U_flat
+        ).reshape(self.M, self.D)
+
     def update_transform(self) -> None:
         tiny = np.finfo(self.dtype).tiny
         self.P1_ext.reshape(self.M, self.D)[:] = self.P1[:, None]
@@ -332,6 +369,57 @@ class AtlasRegistration(EMRegistration):
             "R_world": R_world,
             "s_world": s_world,
             "t_world": t_world,
+            "b_precision": self._b_precision,
+            "b_covariance": self._b_covariance,
+            "pointwise_variance": self.pointwise_variance(),
+            "diagnostics": self.registration_diagnostics(),
+        }
+
+    def shape_posterior(self, world_units: bool = False) -> Dict[str, np.ndarray]:
+        """Return a local Gaussian posterior approximation for atlas scores.
+
+        The covariance is a Laplace-style approximation around the current
+        coefficient estimate.  Scores remain in atlas coefficient units.  When
+        ``world_units`` is True, pointwise variance is scaled into world-space
+        coordinate units for normalized registrations.
+        """
+        return {
+            "mean": self.b.copy(),
+            "precision": self._b_precision.copy(),
+            "covariance": self._b_covariance.copy(),
+            "pointwise_variance": self.pointwise_variance(world_units=world_units),
+        }
+
+    def pointwise_variance(self, world_units: bool = True) -> np.ndarray:
+        """Return per-atlas-point coordinate variance induced by score uncertainty."""
+        variance = self._pointwise_variance.copy()
+        s2 = float(self.s) ** 2 if self.optimize_similarity else 1.0
+        if world_units and self.normalize:
+            s2 *= float(self.target_scale) ** 2
+        return (s2 * variance).astype(self.dtype, copy=False)
+
+    def registration_diagnostics(self) -> Dict[str, Any]:
+        """Return scalar diagnostics useful for probabilistic atlas inference."""
+        tiny = np.finfo(self.dtype).tiny
+        coeff_mahalanobis = float(np.sum((self.b.reshape(-1) ** 2) * self.invL))
+        posterior_entropy = None
+        if self.P is not None:
+            if hasattr(self.P, "data"):
+                p_data = self.P.data
+                posterior_entropy = float(-np.sum(p_data * np.log(np.maximum(p_data, tiny))))
+            else:
+                p_data = np.asarray(self.P, dtype=self.dtype)
+                posterior_entropy = float(-np.sum(p_data * np.log(np.maximum(p_data, tiny))))
+        return {
+            "sigma2": float(self.sigma2),
+            "sigma_diff": float(getattr(self, "sigma_diff", np.inf)),
+            "b_diff": float(getattr(self, "b_diff", np.inf)),
+            "Np": float(getattr(self, "Np", 0.0)),
+            "coefficient_mahalanobis": coeff_mahalanobis,
+            "posterior_entropy": posterior_entropy,
+            "using_sparse": bool(getattr(self, "_use_sparse", False)),
+            "pointwise_variance_mean": float(np.mean(self.pointwise_variance())),
+            "pointwise_variance_max": float(np.max(self.pointwise_variance())),
         }
 
     def transformed_points(self, denormalize: bool = True) -> np.ndarray:
