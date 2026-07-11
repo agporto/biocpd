@@ -2,6 +2,21 @@
 
 All notable changes in this fork are documented in this file.
 
+## 1.3.0 - 2026-07-11
+
+### Added
+
+- Added deterministic, opt-in pose-marginalized initialization for
+  `AtlasRegistration`.
+- Added warm-start APIs for atlas coefficients and world-space similarity
+  transforms.
+- Added reusable `PoseMarginalizedConfig` and diagnostic result metadata.
+
+### Compatibility
+
+- Existing `AtlasRegistration` constructor defaults, registration behavior, and
+  parameter dictionary remain unchanged when pose initialization is not used.
+
 ## 0.2.0 - 2026-03-12
 
 Changes in this release summarize the full diff between `main` and the current branch.

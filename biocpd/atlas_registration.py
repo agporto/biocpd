@@ -169,6 +169,77 @@ class AtlasRegistration(EMRegistration):
         s = s if s>np.finfo(self.dtype).tiny else 1.0
         return (Z - self.t) @ self.R / s
 
+    def set_initial_coefficients(self, coefficients: np.ndarray) -> None:
+        """Set shape coefficients before registration starts."""
+        coefficients = np.asarray(coefficients, dtype=self.dtype)
+        if coefficients.size != self.K:
+            raise ValueError(
+                f"coefficients must contain {self.K} values, got {coefficients.size}"
+            )
+        coefficients = coefficients.reshape(self.K, 1)
+        if not np.isfinite(coefficients).all():
+            raise ValueError("initial coefficients must be finite")
+        self.b = coefficients.copy()
+        self.prev_b = coefficients.copy()
+        self._deformation[:] = self.U_flat.dot(self.b).reshape(self.M, self.D)
+        self.TY = self._apply_similarity(self.Y + self._deformation)
+        self.TY_world = self._denormalize(self.TY)
+
+    def set_initial_similarity(
+        self,
+        rotation: np.ndarray,
+        scale: float,
+        translation: np.ndarray,
+        *,
+        world_units: bool = True,
+    ) -> None:
+        """Set a similarity transform before registration starts."""
+        rotation = np.asarray(rotation, dtype=self.dtype)
+        translation = np.asarray(translation, dtype=self.dtype).reshape(1, self.D)
+        if rotation.shape != (self.D, self.D):
+            raise ValueError("rotation has an invalid shape")
+        if not np.isfinite(rotation).all() or not np.isfinite(translation).all():
+            raise ValueError("initial similarity must be finite")
+        if scale <= 0 or not np.isfinite(scale):
+            raise ValueError("scale must be finite and positive")
+        if not np.allclose(
+            rotation.T @ rotation,
+            np.eye(self.D),
+            atol=1e-5,
+        ) or np.linalg.det(rotation) <= 0:
+            raise ValueError("rotation must be a proper orthogonal matrix")
+        self.R = rotation
+        self.s = float(scale if self.with_scale else 1.0)
+        if self.normalize and world_units:
+            centroid = self.target_centroid.reshape(1, self.D)
+            self.t = (
+                self.s * (centroid @ self.R.T)
+                + translation
+                - centroid
+            ) / self.target_scale
+        else:
+            self.t = translation
+        self.TY = self._apply_similarity(self.Y + self._deformation)
+        self.TY_world = self._denormalize(self.TY)
+
+    def set_initial_state(
+        self,
+        coefficients: np.ndarray,
+        rotation: np.ndarray,
+        scale: float,
+        translation: np.ndarray,
+        *,
+        world_units: bool = True,
+    ) -> None:
+        """Warm-start coefficients and similarity in a consistent order."""
+        self.set_initial_coefficients(coefficients)
+        self.set_initial_similarity(
+            rotation,
+            scale,
+            translation,
+            world_units=world_units,
+        )
+
     def register(self, callback: Callable[..., None] = lambda **kwargs: None) -> Tuple[np.ndarray, Dict[str, Any]]:
         if self.normalize and callable(callback):
             def _cb(**kw):
@@ -332,6 +403,22 @@ class AtlasRegistration(EMRegistration):
             "R_world": R_world,
             "s_world": s_world,
             "t_world": t_world,
+        }
+
+    def registration_diagnostics(self) -> Dict[str, Any]:
+        """Return scalar diagnostics for optional initialization strategies."""
+        coefficient_mahalanobis = float(
+            np.sum((self.b.reshape(-1) ** 2) * self.invL)
+        )
+        return {
+            "sigma2": float(self.sigma2),
+            "objective": float(self.q),
+            "objective_diff": float(getattr(self, "q_diff", np.inf)),
+            "sigma_diff": float(getattr(self, "sigma_diff", np.inf)),
+            "b_diff": float(getattr(self, "b_diff", np.inf)),
+            "Np": float(getattr(self, "Np", 0.0)),
+            "coefficient_mahalanobis": coefficient_mahalanobis,
+            "using_sparse": bool(getattr(self, "_use_sparse", False)),
         }
 
     def transformed_points(self, denormalize: bool = True) -> np.ndarray:

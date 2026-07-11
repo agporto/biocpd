@@ -5,6 +5,7 @@ Coherent Point Drift (CPD) registration in pure NumPy/SciPy with fast variants:
 - Deformable CPD with low-rank (randomized SVD) and k-d tree accelerated E-step
 - Constrained Deformable CPD with correspondence priors
 - Atlas/SSM-based CPD (`AtlasRegistration`) optimized in coefficient space
+- Opt-in pose-marginalized initialization for severely misaligned atlas inputs
 
 ## Why biocpd?
 - Fast: sparse k-NN E-step, low-rank kernels, and efficient linear solvers
@@ -72,6 +73,63 @@ atl = AtlasRegistration(X=X, Y=mean_shape, mean_shape=None,
                         max_iterations=50)
 TY_atl, params_atl = atl.register()
 ```
+
+## Pose-marginalized atlas initialization
+
+`pose_marginalized_initialization` evaluates a deterministic lattice of global
+rotation hypotheses, jointly refines pose and shape for the strongest
+hypotheses, and returns a warm-start state for `AtlasRegistration`. It is
+strictly opt-in: existing `AtlasRegistration` construction and registration
+behavior are unchanged.
+
+```python
+from biocpd import (
+    AtlasRegistration,
+    PoseMarginalizedConfig,
+)
+
+pose_config = PoseMarginalizedConfig(seed=0)
+initial = pose_config.initialize(mean_shape, X, U, L)
+
+atl = AtlasRegistration(
+    X=X,
+    Y=mean_shape,
+    mean_shape=None,
+    U=U,
+    eigenvalues=L,
+    lambda_reg=0.1,
+    normalize=True,
+    optimize_similarity=True,
+    with_scale=True,
+)
+atl.set_initial_state(
+    initial.coefficients,
+    initial.rotation,
+    initial.scale,
+    initial.translation,
+    world_units=True,
+)
+TY_atl, params_atl = atl.register()
+```
+
+The function API remains available for one-off configuration:
+
+```python
+from biocpd import pose_marginalized_initialization
+
+initial = pose_marginalized_initialization(
+    mean_shape,
+    X,
+    U,
+    L,
+    rotation_count=96,
+    seed=0,
+)
+```
+
+Pose initialization adds computation before the final atlas registration. Use
+it when global orientation is uncertain or severe misalignment is expected;
+skip it for inputs already known to be aligned.
 
 ## Key options
 - `use_kdtree`, `k`: enable sparse E-step for speed on large data

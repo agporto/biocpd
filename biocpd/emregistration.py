@@ -263,6 +263,7 @@ class EMRegistration(object):
         Pt1 = np.zeros((self.N,), dtype=self.dtype)
         P1 = np.zeros((self.M,), dtype=self.dtype)
         PX = np.zeros((self.M, self.D), dtype=self.dtype)
+        log_den_sum = 0.0
 
         for start in range(0, self.N, block_size):
             stop = min(start + block_size, self.N)
@@ -278,6 +279,7 @@ class EMRegistration(object):
             den = np.sum(weights, axis=0, keepdims=True)
             den += c
             np.clip(den, self._tiny, None, out=den)
+            log_den_sum += float(np.log(den).sum())
             weights /= den
 
             if store_p:
@@ -291,6 +293,14 @@ class EMRegistration(object):
         self.P1 = P1
         self.Np = float(P1.sum())
         self.PX = PX
+        previous_q = self.q
+        self.q = float(
+            self.N * self.D * 0.5 * np.log(2.0 * np.pi * self.sigma2)
+            - log_den_sum
+        )
+        self.q_diff = (
+            abs(self.q - previous_q) if np.isfinite(previous_q) else np.inf
+        )
 
     def maximization(self):
         """
