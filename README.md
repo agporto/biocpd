@@ -122,10 +122,18 @@ initial = pose_marginalized_initialization(
     X,
     U,
     L,
-    rotation_count=96,
+    rotation_count=193,
     seed=0,
 )
 ```
+
+`rotation_count` is the exact total hypothesis budget, including identity.
+Coarse hypotheses are screened after `coarse_screen_iterations`, and only
+`coarse_survivor_count` receive the complete coarse EM budget. Refinement uses
+at most `refine_source_count` source and `refine_target_count` target points,
+while every finalist is scored against the complete source model. Set
+`n_jobs` above 1 (or to -1 for all detected CPUs) to evaluate independent
+hypotheses concurrently.
 
 Pose initialization adds computation before the final atlas registration. Use
 it when global orientation is uncertain or severe misalignment is expected;

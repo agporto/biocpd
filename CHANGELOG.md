@@ -11,6 +11,13 @@ All notable changes in this fork are documented in this file.
 - Added warm-start APIs for atlas coefficients and world-space similarity
   transforms.
 - Added reusable `PoseMarginalizedConfig` and diagnostic result metadata.
+- Made `rotation_count` the exact hypothesis budget and added staged coarse
+  screening so full coarse EM is reserved for competitive poses.
+- Reworked pose likelihood scoring to reuse the blocked CPD squared-distance
+  algebra, reducing score time and peak working memory without changing the
+  objective.
+- Added bounded source subsampling for finalist optimization, full-source
+  finalist scoring, and deterministic opt-in parallel hypothesis evaluation.
 
 ### Compatibility
 
