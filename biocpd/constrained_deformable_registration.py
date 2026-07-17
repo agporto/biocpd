@@ -61,15 +61,16 @@ class ConstrainedDeformableRegistration(DeformableRegistration):
             # B = PX - diag(P1)Y + sigma2/e_alpha * (PX_tilde - diag(P1_tilde)Y)
             B = self.PX - (self.P1[:, None] * self.Y) + (self.sigma2 * (1.0 / self.e_alpha)) * (self.PX_tilde - (self.P1_tilde[:, None] * self.Y))
             self.W = np.linalg.solve(A, B)
+            self._low_rank_coefficients = None
+            self._low_rank_coefficients_current = False
 
         elif self.low_rank is True:
             # Vector weights instead of explicit diagonal
             dP_vec = self.P1 + (self.sigma2 * (1.0 / self.e_alpha)) * self.P1_tilde  # (M,)
-            dPQ = (dP_vec[:, None] * self.Q)  # (M, K)
             F = self.PX - (self.P1[:, None] * self.Y) + (self.sigma2 * (1.0 / self.e_alpha)) * (self.PX_tilde - (self.P1_tilde[:, None] * self.Y))
 
-            # Solve via Woodbury
-            M_small = (self.alpha * self.sigma2 * self.inv_S) + (self.Q.T @ dPQ)
-            rhs = (self.Q.T @ F)
-            inner = np.linalg.solve(M_small, rhs)
-            self.W = (1.0 / (self.alpha * self.sigma2)) * (F - dPQ @ inner)
+            self._update_low_rank_transform(
+                dP_vec,
+                F,
+                self.dtype.type(self.alpha * self.sigma2),
+            )

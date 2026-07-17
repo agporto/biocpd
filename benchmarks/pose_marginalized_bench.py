@@ -74,17 +74,16 @@ def main():
 
     cases = [
         (
-            "full-coarse",
+            "default-full",
             dict(
-                coarse_screen_iterations=8,
-                coarse_survivor_count=193,
-                refine_source_count=args.points,
                 n_jobs=1,
             ),
         ),
         (
             "staged-serial",
             dict(
+                coarse_screen_iterations=2,
+                coarse_survivor_count=48,
                 refine_source_count=min(1600, args.points),
                 n_jobs=1,
             ),
@@ -92,6 +91,8 @@ def main():
         (
             "staged-parallel",
             dict(
+                coarse_screen_iterations=2,
+                coarse_survivor_count=48,
                 refine_source_count=min(1600, args.points),
                 n_jobs=args.n_jobs,
             ),

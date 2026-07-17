@@ -18,6 +18,26 @@ All notable changes in this fork are documented in this file.
   objective.
 - Added bounded source subsampling for finalist optimization, full-source
   finalist scoring, and deterministic opt-in parallel hypothesis evaluation.
+- Added an opt-in deterministic pivoted-Cholesky Gaussian-kernel factorization
+  for deformable and constrained-deformable CPD. It does not construct the
+  complete `M x M` kernel and reports the achieved rank and maximum residual
+  diagonal through `low_rank_diagnostics`.
+- Added focused algebra, convergence, dtype, degeneracy, and compatibility
+  regression tests for low-rank deformable registration.
+- Added `benchmarks/deformable_low_rank_bench.py` to compare initialization,
+  fitting time, and alignment quality between low-rank methods.
+
+### Changed
+
+- Low-rank deformable M-steps now use Cholesky on the positive-definite
+  coefficient system and transform training points directly from the solved
+  coefficients. The historical `Q`, `S`, and `W` return contract is preserved.
+- Scikit-learn's randomized-SVD implementation is imported lazily when that
+  low-rank method is selected.
+- Pose initialization now defaults to completing all eight coarse iterations
+  for all 193 rotation hypotheses and refining against the complete source
+  model. Staged coarse pruning and refinement subsampling remain available as
+  explicit performance options.
 
 ### Compatibility
 

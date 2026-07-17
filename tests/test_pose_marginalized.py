@@ -1,7 +1,10 @@
+import inspect
+
 import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
+import biocpd.initialization.pose_marginalized as pose_module
 from biocpd import (
     AffineRegistration,
     AtlasRegistration,
@@ -186,6 +189,76 @@ def test_single_refinement_keeps_best_coarse_hypothesis():
     assert single[0] is best_nonidentity
     assert multiple[0] is best_nonidentity
     assert multiple[1] is identity
+
+
+def test_pose_search_defaults_use_exhaustive_coarse_and_full_source():
+    config = PoseMarginalizedConfig()
+    signature = inspect.signature(pose_marginalized_initialization)
+
+    assert config.coarse_screen_iterations == config.coarse_iterations == 8
+    assert config.coarse_survivor_count == config.rotation_count == 193
+    assert config.refine_source_count is None
+    assert signature.parameters["coarse_screen_iterations"].default == 8
+    assert signature.parameters["coarse_survivor_count"].default == 193
+    assert signature.parameters["refine_source_count"].default is None
+
+
+def test_full_source_refinement_preserves_all_source_points(monkeypatch):
+    source = _asymmetric_cloud(seed=31, count=18)
+    target = source + np.array([0.2, -0.1, 0.05])
+    modes = np.zeros((source.size, 1))
+    refinement_sources = []
+
+    class RecordingAtlasRegistration(AtlasRegistration):
+        def __init__(self, *args, **kwargs):
+            if len(kwargs["Y"]) == len(source):
+                refinement_sources.append(kwargs["Y"].copy())
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(
+        pose_module,
+        "AtlasRegistration",
+        RecordingAtlasRegistration,
+    )
+    pose_marginalized_initialization(
+        source,
+        target,
+        modes,
+        np.ones(1),
+        rotation_count=1,
+        coarse_source_count=8,
+        coarse_target_count=8,
+        coarse_rank=1,
+        coarse_iterations=1,
+        coarse_screen_iterations=1,
+        coarse_survivor_count=1,
+        refine_count=1,
+        refine_source_count=None,
+        refine_target_count=12,
+        refine_iterations=1,
+    )
+
+    assert len(refinement_sources) == 1
+    np.testing.assert_array_equal(refinement_sources[0], source)
+
+
+def test_nonpositive_refine_source_count_is_rejected():
+    source = _asymmetric_cloud(seed=32, count=8)
+    with pytest.raises(ValueError, match="positive or None"):
+        pose_marginalized_initialization(
+            source,
+            source.copy(),
+            np.zeros((source.size, 1)),
+            np.ones(1),
+            rotation_count=1,
+            coarse_rank=1,
+            coarse_iterations=1,
+            coarse_screen_iterations=1,
+            coarse_survivor_count=1,
+            refine_count=1,
+            refine_source_count=0,
+            refine_iterations=1,
+        )
 
 
 def test_config_preserves_function_api_and_result_type():

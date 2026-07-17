@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 from scipy.special import logsumexp
@@ -39,10 +40,10 @@ class PoseMarginalizedConfig:
     coarse_target_count: int = 400
     coarse_rank: int = 12
     coarse_iterations: int = 8
-    coarse_screen_iterations: int = 2
-    coarse_survivor_count: int = 48
+    coarse_screen_iterations: int = 8
+    coarse_survivor_count: int = 193
     refine_count: int = 12
-    refine_source_count: int = 1600
+    refine_source_count: Optional[int] = None
     refine_target_count: int = 1600
     refine_iterations: int = 30
     lambda_reg: float = 0.01
@@ -107,6 +108,16 @@ def _farthest_indices(points: np.ndarray, count: int) -> np.ndarray:
         squared = np.sum((points - points[selected[index]]) ** 2, axis=1)
         minimum_squared = np.minimum(minimum_squared, squared)
     return selected
+
+
+def _subsample_indices(
+    points: np.ndarray,
+    count: Optional[int],
+) -> np.ndarray:
+    """Return all indices unchanged or a deterministic spatial subset."""
+    if count is None or count >= len(points):
+        return np.arange(len(points))
+    return _farthest_indices(points, count)
 
 
 def _rotation_lattice(count: int, seed: int) -> list[np.ndarray]:
@@ -333,10 +344,10 @@ def pose_marginalized_initialization(
     coarse_target_count: int = 400,
     coarse_rank: int = 12,
     coarse_iterations: int = 8,
-    coarse_screen_iterations: int = 2,
-    coarse_survivor_count: int = 48,
+    coarse_screen_iterations: int = 8,
+    coarse_survivor_count: int = 193,
     refine_count: int = 12,
-    refine_source_count: int = 1600,
+    refine_source_count: Optional[int] = None,
     refine_target_count: int = 1600,
     refine_iterations: int = 30,
     lambda_reg: float = 0.01,
@@ -384,10 +395,10 @@ def pose_marginalized_initialization(
         raise ValueError(
             "coarse_survivor_count must cover the requested finalists"
         )
-    if refine_source_count < 1 or refine_target_count < 1:
-        raise ValueError(
-            "refine_source_count and refine_target_count must be positive"
-        )
+    if refine_source_count is not None and refine_source_count < 1:
+        raise ValueError("refine_source_count must be positive or None")
+    if refine_target_count < 1:
+        raise ValueError("refine_target_count must be positive")
     if lambda_reg < 0:
         raise ValueError("lambda_reg must be non-negative")
     if not 0 <= outlier_weight < 1:
@@ -396,8 +407,8 @@ def pose_marginalized_initialization(
         raise ValueError("identity_prior_probability must be in (0, 1)")
     n_jobs = _resolve_n_jobs(n_jobs)
 
-    source_indices = _farthest_indices(source, coarse_source_count)
-    target_indices = _farthest_indices(target, coarse_target_count)
+    source_indices = _subsample_indices(source, coarse_source_count)
+    target_indices = _subsample_indices(target, coarse_target_count)
     coarse_source = source[source_indices]
     coarse_target = target[target_indices]
     rank = min(int(coarse_rank), len(eigenvalues))
@@ -493,13 +504,8 @@ def pose_marginalized_initialization(
 
     finalists = _select_finalists(coarse_results, refine_count)
 
-    refined_target = target[
-        _farthest_indices(target, min(refine_target_count, len(target)))
-    ]
-    refine_source_indices = _farthest_indices(
-        source,
-        min(refine_source_count, len(source)),
-    )
+    refined_target = target[_subsample_indices(target, refine_target_count)]
+    refine_source_indices = _subsample_indices(source, refine_source_count)
     refined_source = source[refine_source_indices]
     refined_modes = modes.reshape(len(source), 3, -1)[
         refine_source_indices

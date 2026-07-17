@@ -47,8 +47,9 @@ TY_rigid, (s, R, t) = rig.register()
 aff = AffineRegistration(X=X, Y=Y, max_iterations=50, use_kdtree=True, k=10)
 TY_affine, (B, t) = aff.register()
 
-# Deformable CPD (low-rank + k-d tree)
+# Deformable CPD (scalable low-rank kernel + k-d tree)
 defm = DeformableRegistration(X=X, Y=Y, alpha=2.0, beta=2.0, low_rank=True, num_eig=80,
+                              low_rank_method="pivoted_cholesky",
                               use_kdtree=True, k=10, radius_mode=False, w=0.05,
                               max_iterations=50)
 TY_def, params = defm.register()
@@ -56,6 +57,7 @@ TY_def, params = defm.register()
 # Constrained Deformable CPD
 ids = np.arange(10)
 con = ConstrainedDeformableRegistration(X=X, Y=Y, alpha=2.0, beta=2.0, low_rank=True, num_eig=80,
+                                        low_rank_method="pivoted_cholesky",
                                         use_kdtree=True, k=10, e_alpha=1e-4,
                                         source_id=ids, target_id=ids,
                                         max_iterations=50)
@@ -128,12 +130,14 @@ initial = pose_marginalized_initialization(
 ```
 
 `rotation_count` is the exact total hypothesis budget, including identity.
-Coarse hypotheses are screened after `coarse_screen_iterations`, and only
-`coarse_survivor_count` receive the complete coarse EM budget. Refinement uses
-at most `refine_source_count` source and `refine_target_count` target points,
-while every finalist is scored against the complete source model. Set
-`n_jobs` above 1 (or to -1 for all detected CPUs) to evaluate independent
-hypotheses concurrently.
+By default, every coarse hypothesis receives all eight coarse EM iterations
+(`coarse_screen_iterations=coarse_iterations=8` and
+`coarse_survivor_count=rotation_count=193`). Set a smaller screen iteration
+count and survivor count to opt into staged pruning. Refinement uses the full
+source model by default (`refine_source_count=None`) and at most
+`refine_target_count` target points; every finalist is scored against the
+complete source model. Set `n_jobs` above 1 (or to -1 for all detected CPUs)
+to evaluate independent hypotheses concurrently.
 
 Pose initialization adds computation before the final atlas registration. Use
 it when global orientation is uncertain or severe misalignment is expected;
@@ -142,6 +146,12 @@ skip it for inputs already known to be aligned.
 ## Key options
 - `use_kdtree`, `k`: enable sparse E-step for speed on large data
 - `low_rank`, `num_eig` (deformable): low-rank kernel for fast M-step
+- `low_rank_method` (deformable): `"randomized_svd"` preserves the historical
+  default; `"pivoted_cholesky"` avoids constructing the full square kernel and
+  is intended for large point sets
+- `low_rank_tolerance` (deformable): optional residual-diagonal stopping
+  tolerance for pivoted Cholesky; the default `0.0` uses the requested rank
+  unless the kernel becomes numerically rank deficient
 - `radius_mode`: optional radius gating in sparse E-step (off by default)
 - `w`: outlier weight (0 ≤ w < 1) in GMM
 - `dtype` (deformable, constrained deformable, atlas): defaults to `np.float32`; set `dtype=np.float64` when you need the extra precision

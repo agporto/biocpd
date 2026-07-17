@@ -1,12 +1,16 @@
 from builtins import super
 import numpy as np
 import numbers
+from scipy.linalg import cho_factor, cho_solve
 from scipy.spatial import cKDTree
 from scipy.sparse import csr_matrix
+from ._low_rank import (
+    gaussian_kernel_eigendecomposition,
+    validate_low_rank_options,
+)
 from .emregistration import EMRegistration
 from .utility import gaussian_kernel
 
-from sklearn.utils.extmath import randomized_svd
 
 class DeformableRegistration(EMRegistration):
     """
@@ -29,6 +33,13 @@ class DeformableRegistration(EMRegistration):
         improve performance.
     num_eig: int
         Number of eigenvectors to use in the low-rank approximation.
+    low_rank_method: str
+        Kernel factorization used in low-rank mode. ``"randomized_svd"``
+        preserves the historical behavior. ``"pivoted_cholesky"`` avoids
+        constructing the full square kernel.
+    low_rank_tolerance: float
+        Residual-diagonal tolerance for pivoted Cholesky. A value of zero uses
+        only a dtype-scaled numerical stopping threshold.
     use_kdtree: bool
         If True, accelerates the E-step by using a k-d tree for nearest neighbor
         searches.
@@ -49,6 +60,8 @@ class DeformableRegistration(EMRegistration):
                  k=10,
                  radius_mode=False,
                  w=0.0,
+                 low_rank_method="randomized_svd",
+                 low_rank_tolerance=0.0,
                  *args,
                  **kwargs):
         """
@@ -63,7 +76,15 @@ class DeformableRegistration(EMRegistration):
         low_rank: bool, optional
             Whether to use low-rank approximation. Defaults to True.
         num_eig: int, optional
-            Number of eigenmodes to use for low-rank approximation. Defaults to 100.
+            Maximum number of eigenmodes in the low-rank approximation.
+            Defaults to 300.
+        low_rank_method: str, optional
+            ``"randomized_svd"`` constructs the complete kernel before
+            compressing it and remains the default for backward compatibility.
+            ``"pivoted_cholesky"`` builds a deterministic factor from kernel
+            columns and uses O(M * num_eig) memory.
+        low_rank_tolerance: float, optional
+            Early-stopping tolerance for pivoted Cholesky. Defaults to zero.
         use_kdtree: bool, optional
             Whether to use a k-d tree for acceleration. Defaults to True.
         k: int, optional
@@ -85,17 +106,38 @@ class DeformableRegistration(EMRegistration):
         self.alpha = 2.0 if alpha is None else alpha
         self.beta = 2.0 if beta is None else beta
         self.low_rank = low_rank
-        self.num_eig = num_eig
         self.W = np.zeros((self.M, self.D), dtype=self.dtype)
+        self._low_rank_coefficients = None
+        self._low_rank_coefficients_current = False
 
         # Pre-compute Gaussian kernel or its low-rank approximation.
         if self.low_rank:
-            G_full = gaussian_kernel(self.Y, self.beta)
-            U, S, _ = randomized_svd(G_full, n_components=self.num_eig, n_iter=3)
-            self.Q = U         # M x num_eig
-            self.S = np.diag(S) # num_eig x num_eig
-            self.inv_S = np.diag(1. / S)
+            self.num_eig, self.low_rank_method, self.low_rank_tolerance = (
+                validate_low_rank_options(
+                    num_eig,
+                    low_rank_method,
+                    low_rank_tolerance,
+                )
+            )
+            self.Q, self._S_values, self.low_rank_diagnostics = (
+                gaussian_kernel_eigendecomposition(
+                    self.Y,
+                    self.beta,
+                    self.num_eig,
+                    method=self.low_rank_method,
+                    tolerance=self.low_rank_tolerance,
+                )
+            )
+            self._inv_S_values = 1.0 / self._S_values
+            # Preserve the historical public factor representation and return
+            # contract while using vector forms for internal arithmetic.
+            self.S = np.diag(self._S_values)
+            self.inv_S = np.diag(self._inv_S_values)
         else:
+            self.num_eig = num_eig
+            self.low_rank_method = low_rank_method
+            self.low_rank_tolerance = low_rank_tolerance
+            self.low_rank_diagnostics = None
             self.G = gaussian_kernel(self.Y, self.beta)
 
         # K-D tree setup for accelerated E-step.
@@ -177,6 +219,8 @@ class DeformableRegistration(EMRegistration):
             A = (self.P1[:, None] * self.G) + self.alpha * self.sigma2 * np.eye(self.M, dtype=self.dtype)
             B = self.PX - (self.P1[:, None] * self.Y)
             self.W = np.linalg.solve(A, B)
+            self._low_rank_coefficients = None
+            self._low_rank_coefficients_current = False
         else:
             # Efficiently solve for W using the Woodbury matrix identity.
             # The system is (diag(P1)QSQ' + lambda*I)W = F, where lambda = alpha*sigma^2.
@@ -185,16 +229,36 @@ class DeformableRegistration(EMRegistration):
             lambda_val = self.dtype.type(self.alpha * self.sigma2)
             F = self.PX - (self.P1[:, np.newaxis] * self.Y)
             
-            # Mmat = (lambda*S^-1 + Q'DQ)
-            mmat_term = self.Q.T @ (self.P1[:, np.newaxis] * self.Q)
-            Mmat = lambda_val * self.inv_S + mmat_term
+            self._update_low_rank_transform(self.P1, F, lambda_val)
 
-            # sol = (Mmat)^-1 * Q'F
-            sol = np.linalg.solve(Mmat, self.Q.T @ F)
-            
-            # W = (1/lambda) * (F - DQ * sol)
-            self.W = (F - (self.P1[:, np.newaxis] * self.Q) @ sol) / lambda_val
+    def _update_low_rank_transform(self, weights, F, lambda_val):
+        """Solve a low-rank CPD M-step and cache deformation coefficients."""
+        weighted_basis = weights[:, np.newaxis] * self.Q
+        system = self.Q.T @ weighted_basis
+        diagonal = np.diag_indices_from(system)
+        system[diagonal] += lambda_val * self._inv_S_values
+        rhs = self.Q.T @ F
 
+        try:
+            factor = cho_factor(
+                system,
+                overwrite_a=False,
+                check_finite=False,
+            )
+            coefficients = cho_solve(
+                factor,
+                rhs,
+                overwrite_b=True,
+                check_finite=False,
+            )
+        except np.linalg.LinAlgError:
+            # This system is positive definite analytically. Retain a general
+            # solve as a numerical fallback for unusually ill-conditioned data.
+            coefficients = np.linalg.solve(system, rhs)
+
+        self._low_rank_coefficients = coefficients
+        self._low_rank_coefficients_current = True
+        self.W = (F - weighted_basis @ coefficients) / lambda_val
 
     def transform_point_cloud(self, Y=None):
         """
@@ -218,8 +282,17 @@ class DeformableRegistration(EMRegistration):
         else:
             # Transform the original source point cloud.
             if self.low_rank:
-                # Use G = QSQ' approximation
-                self.TY = self.Y + self.Q @ self.S @ (self.Q.T @ self.W)
+                if self._low_rank_coefficients_current:
+                    coefficients = self._low_rank_coefficients
+                else:
+                    # Derive coefficients from W so callers that explicitly
+                    # replace the public W array retain historical behavior.
+                    coefficients = self._S_values[:, None] * (
+                        self.Q.T @ self.W
+                    )
+                self._low_rank_coefficients = coefficients
+                self._low_rank_coefficients_current = False
+                self.TY = self.Y + self.Q @ coefficients
             else:
                 self.TY = self.Y + self.G @ self.W
             return self.TY
