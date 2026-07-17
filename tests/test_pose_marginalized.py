@@ -11,9 +11,11 @@ from biocpd import (
     pose_marginalized_initialization,
 )
 from biocpd.initialization.pose_marginalized import (
+    _Candidate,
     _candidate_from_registration,
     _dense_data_objective,
     _rotation_lattice,
+    _select_finalists,
 )
 
 
@@ -160,6 +162,31 @@ def test_rotation_lattice_is_deterministic_and_proper():
     np.testing.assert_array_equal(first[0], np.eye(3))
 
 
+def test_single_refinement_keeps_best_coarse_hypothesis():
+    def candidate(score):
+        return _Candidate(
+            score=score,
+            prior_cost=0.0,
+            coefficients=np.zeros(1),
+            rotation=np.eye(3),
+            scale=1.0,
+            translation=np.zeros((1, 3)),
+        )
+
+    identity = candidate(3.0)
+    best_nonidentity = candidate(1.0)
+    second_nonidentity = candidate(2.0)
+    coarse_results = [identity, best_nonidentity, second_nonidentity]
+
+    single = _select_finalists(coarse_results, refine_count=1)
+    multiple = _select_finalists(coarse_results, refine_count=2)
+
+    assert len(single) == 1
+    assert single[0] is best_nonidentity
+    assert multiple[0] is best_nonidentity
+    assert multiple[1] is identity
+
+
 def test_config_preserves_function_api_and_result_type():
     source = _asymmetric_cloud(seed=8, count=30)
     modes = np.zeros((source.size, 1))
@@ -259,7 +286,8 @@ def test_pose_candidate_scoring_is_pure_and_uses_final_state():
     np.testing.assert_array_equal(registration.TY, state["TY"])
 
 
-def test_pose_initializer_recovers_large_rotation():
+@pytest.mark.parametrize("refine_count", [1, 4])
+def test_pose_initializer_recovers_large_rotation(refine_count):
     source = _asymmetric_cloud(seed=19, count=80)
     modes = np.zeros((source.size, 2))
     modes[::3, 0] = 0.05 * source[:, 0]
@@ -280,7 +308,7 @@ def test_pose_initializer_recovers_large_rotation():
         coarse_target_count=60,
         coarse_rank=2,
         coarse_iterations=4,
-        refine_count=4,
+        refine_count=refine_count,
         refine_target_count=80,
         refine_iterations=8,
         seed=7,

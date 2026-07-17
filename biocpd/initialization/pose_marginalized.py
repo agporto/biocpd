@@ -216,6 +216,22 @@ def _posterior_summary(scores: np.ndarray) -> tuple[float, float]:
     return entropy, float(np.exp(entropy))
 
 
+def _select_finalists(
+    coarse_results: list[_Candidate],
+    refine_count: int,
+) -> list[_Candidate]:
+    identity_result = coarse_results[0]
+    finalists = sorted(
+        coarse_results,
+        key=lambda result: result.score,
+    )[: min(refine_count, len(coarse_results))]
+    if len(finalists) > 1 and not any(
+        result is identity_result for result in finalists
+    ):
+        finalists[-1] = identity_result
+    return finalists
+
+
 def pose_marginalized_initialization(
     source: np.ndarray,
     target: np.ndarray,
@@ -317,11 +333,7 @@ def pose_marginalized_initialization(
             _candidate_from_registration(registration, lambda_reg, prior_cost)
         )
 
-    identity_result = coarse_results[0]
-    coarse_results.sort(key=lambda result: result.score)
-    finalists = coarse_results[: min(refine_count, len(coarse_results))]
-    if not any(result is identity_result for result in finalists):
-        finalists[-1] = identity_result
+    finalists = _select_finalists(coarse_results, refine_count)
 
     refined_target = target[
         _farthest_indices(target, min(refine_target_count, len(target)))
