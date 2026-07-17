@@ -1,13 +1,20 @@
 import numpy as np
+import pytest
 from scipy.spatial.transform import Rotation
 
 from biocpd import (
+    AffineRegistration,
     AtlasRegistration,
     PoseMarginalizedConfig,
     PoseMarginalizedInitialization,
+    RigidRegistration,
     pose_marginalized_initialization,
 )
-from biocpd.pose_marginalized import _rotation_lattice
+from biocpd.initialization.pose_marginalized import (
+    _candidate_from_registration,
+    _dense_data_objective,
+    _rotation_lattice,
+)
 
 
 def _asymmetric_cloud(seed=4, count=60):
@@ -41,7 +48,37 @@ def test_legacy_atlas_parameter_contract_is_unchanged():
         "s_world",
         "t_world",
     }
-    assert np.isfinite(registration.registration_diagnostics()["objective"])
+
+
+@pytest.mark.parametrize("registration_class", [RigidRegistration, AffineRegistration])
+def test_dense_expectation_does_not_mutate_legacy_q(registration_class):
+    source = _asymmetric_cloud(seed=21, count=24)
+    target = source + np.array([0.2, -0.1, 0.05])
+    registration = registration_class(
+        X=target,
+        Y=source,
+        use_kdtree=False,
+        max_iterations=2,
+    )
+    registration.q = 17.25
+    registration.expectation()
+    assert registration.q == 17.25
+
+
+@pytest.mark.parametrize("registration_class", [RigidRegistration, AffineRegistration])
+def test_dense_first_iteration_preserves_legacy_convergence_history(
+    registration_class,
+):
+    source = _asymmetric_cloud(seed=22, count=24)
+    target = source + np.array([0.2, -0.1, 0.05])
+    registration = registration_class(
+        X=target,
+        Y=source,
+        use_kdtree=False,
+        max_iterations=1,
+    )
+    registration.register()
+    assert np.isinf(registration.diff)
 
 
 def test_initial_similarity_uses_world_units_with_normalization():
@@ -97,6 +134,21 @@ def test_initial_state_applies_shape_before_similarity():
     np.testing.assert_allclose(registration.b.ravel(), coefficients)
 
 
+def test_initial_state_is_rejected_after_registration_starts():
+    source = _asymmetric_cloud(seed=12, count=20)
+    registration = AtlasRegistration(
+        X=source.copy(),
+        Y=source,
+        U=np.zeros((source.size, 1)),
+        eigenvalues=np.ones(1),
+        use_kdtree=False,
+        max_iterations=1,
+    )
+    registration.register()
+    with pytest.raises(RuntimeError, match="before registration starts"):
+        registration.set_initial_coefficients(np.zeros(1))
+
+
 def test_rotation_lattice_is_deterministic_and_proper():
     first = _rotation_lattice(24, 13)
     second = _rotation_lattice(24, 13)
@@ -126,6 +178,85 @@ def test_config_preserves_function_api_and_result_type():
     assert isinstance(result, PoseMarginalizedInitialization)
     assert result.hypotheses_evaluated >= 12
     assert np.isfinite(result.score)
+
+
+def test_dense_pose_objective_matches_brute_force_likelihood():
+    source = _asymmetric_cloud(seed=14, count=12)
+    target = source + np.array([0.3, -0.2, 0.1])
+    sigma2 = 0.35
+    outlier_weight = 0.15
+    score = _dense_data_objective(
+        target,
+        source,
+        sigma2,
+        outlier_weight,
+        block_size=5,
+    )
+
+    difference = source[:, None, :] - target[None, :, :]
+    kernel = np.exp(-np.sum(difference * difference, axis=2) / (2.0 * sigma2))
+    inlier = (
+        (1.0 - outlier_weight)
+        * np.sum(kernel, axis=0)
+        / (len(source) * (2.0 * np.pi * sigma2) ** 1.5)
+    )
+    density = inlier + outlier_weight / len(target)
+    expected = -float(np.sum(np.log(density)))
+    assert np.isclose(score, expected, atol=1e-12, rtol=1e-12)
+
+
+def test_pose_candidate_scoring_is_pure_and_uses_final_state():
+    source = _asymmetric_cloud(seed=15, count=20)
+    modes = np.zeros((source.size, 2))
+    modes[::3, 0] = 0.03 * source[:, 0]
+    modes[1::3, 1] = 0.02 * source[:, 1]
+    registration = AtlasRegistration(
+        X=source + np.array([0.1, -0.05, 0.02]),
+        Y=source,
+        mean_shape=source,
+        U=modes,
+        eigenvalues=np.array([0.4, 0.2]),
+        lambda_reg=0.1,
+        normalize=True,
+        use_kdtree=False,
+        w=0.1,
+        dtype=np.float64,
+        max_iterations=3,
+        tolerance=0.0,
+    )
+    registration.register()
+    state = {
+        "q": registration.q,
+        "diff": registration.diff,
+        "iteration": registration.iteration,
+        "sigma2": registration.sigma2,
+        "b": registration.b.copy(),
+        "R": registration.R.copy(),
+        "t": registration.t.copy(),
+        "TY": registration.TY.copy(),
+    }
+    prior_cost = 0.7
+    candidate = _candidate_from_registration(registration, 0.1, prior_cost)
+    expected_data = _dense_data_objective(
+        registration.X,
+        registration.TY,
+        registration.sigma2,
+        registration.w,
+        registration._get_dense_block_size(),
+    )
+    expected_shape = 0.05 * np.sum(
+        registration.b.reshape(-1) ** 2 * registration.invL
+    )
+
+    assert np.isclose(candidate.score, expected_data + expected_shape + prior_cost)
+    assert registration.q == state["q"]
+    assert registration.diff == state["diff"]
+    assert registration.iteration == state["iteration"]
+    assert registration.sigma2 == state["sigma2"]
+    np.testing.assert_array_equal(registration.b, state["b"])
+    np.testing.assert_array_equal(registration.R, state["R"])
+    np.testing.assert_array_equal(registration.t, state["t"])
+    np.testing.assert_array_equal(registration.TY, state["TY"])
 
 
 def test_pose_initializer_recovers_large_rotation():

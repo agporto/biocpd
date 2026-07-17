@@ -34,5 +34,5 @@ Homepage = "https://github.com/agporto/biocpd"
 Repository = "https://github.com/agporto/biocpd"
 Issues = "https://github.com/agporto/biocpd/issues"
 
-[tool.setuptools]
-packages = ["biocpd"]
+[tool.setuptools.packages.find]
+include = ["biocpd*"]

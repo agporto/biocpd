@@ -1,15 +1,15 @@
-"""Annealed pose-marginalized initialization for atlas registration."""
+"""Pose-marginalized initialization for atlas registration."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.special import logsumexp
 from scipy.spatial.transform import Rotation
 from scipy.stats import qmc
 
-from .atlas_registration import AtlasRegistration
-from .utility import _farthest_indices
+from ..atlas_registration import AtlasRegistration
 
 
 @dataclass(frozen=True)
@@ -73,6 +73,32 @@ class PoseMarginalizedConfig:
         )
 
 
+@dataclass(frozen=True)
+class _Candidate:
+    score: float
+    prior_cost: float
+    coefficients: np.ndarray
+    rotation: np.ndarray
+    scale: float
+    translation: np.ndarray
+
+
+def _farthest_indices(points: np.ndarray, count: int) -> np.ndarray:
+    """Select a deterministic farthest-point subset."""
+    points = np.asarray(points, dtype=np.float64)
+    count = min(max(int(count), 1), len(points))
+    centered = points - points.mean(axis=0)
+    first = int(np.argmax(np.einsum("ij,ij->i", centered, centered)))
+    selected = np.empty(count, dtype=int)
+    selected[0] = first
+    minimum_squared = np.sum((points - points[first]) ** 2, axis=1)
+    for index in range(1, count):
+        selected[index] = int(np.argmax(minimum_squared))
+        squared = np.sum((points - points[selected[index]]) ** 2, axis=1)
+        minimum_squared = np.minimum(minimum_squared, squared)
+    return selected
+
+
 def _rotation_lattice(count: int, seed: int) -> list[np.ndarray]:
     """Return a deterministic SO(3) lattice augmented near identity."""
     count = max(int(count), 12)
@@ -122,16 +148,71 @@ def _initial_similarity(
     return scale, translation.reshape(1, 3)
 
 
+def _dense_data_objective(
+    X: np.ndarray,
+    TY: np.ndarray,
+    sigma2: float,
+    w: float,
+    block_size: int,
+) -> float:
+    """Return the dense CPD negative log likelihood without mutating a registrar."""
+    X = np.asarray(X, dtype=np.float64)
+    TY = np.asarray(TY, dtype=np.float64)
+    sigma2 = max(float(sigma2), np.finfo(np.float64).tiny)
+    N, D = X.shape
+    M = len(TY)
+    block_size = max(1, min(int(block_size), N))
+    log_inlier_normalizer = (
+        np.log1p(-w)
+        - np.log(M)
+        - 0.5 * D * np.log(2.0 * np.pi * sigma2)
+    )
+    log_outlier = np.log(w) - np.log(N) if w > 0 else -np.inf
+    objective = 0.0
+
+    for start in range(0, N, block_size):
+        stop = min(start + block_size, N)
+        difference = TY[:, None, :] - X[None, start:stop, :]
+        log_kernel = -np.sum(difference * difference, axis=2) / (2.0 * sigma2)
+        log_inlier = log_inlier_normalizer + logsumexp(log_kernel, axis=0)
+        log_density = np.logaddexp(log_inlier, log_outlier)
+        objective -= float(np.sum(log_density))
+    return objective
+
+
+def _candidate_from_registration(
+    registration: AtlasRegistration,
+    lambda_reg: float,
+    prior_cost: float,
+) -> _Candidate:
+    """Capture and score a completed atlas registration without changing it."""
+    parameters = registration.get_registration_parameters()
+    data_cost = _dense_data_objective(
+        registration.X,
+        registration.TY,
+        registration.sigma2,
+        registration.w,
+        registration._get_dense_block_size(),
+    )
+    coefficients = np.asarray(parameters["b"]).reshape(-1).copy()
+    shape_cost = 0.5 * lambda_reg * float(
+        np.sum(coefficients * coefficients * registration.invL)
+    )
+    return _Candidate(
+        score=float(data_cost + shape_cost + prior_cost),
+        prior_cost=float(prior_cost),
+        coefficients=coefficients,
+        rotation=np.asarray(parameters["R_world"]).copy(),
+        scale=float(parameters["s_world"]),
+        translation=np.asarray(parameters["t_world"]).reshape(1, 3).copy(),
+    )
+
+
 def _posterior_summary(scores: np.ndarray) -> tuple[float, float]:
-    shifted = scores - np.min(scores)
-    positive = shifted[shifted > 0]
-    temperature = float(np.median(positive)) if len(positive) else 1.0
-    temperature = max(temperature, np.finfo(float).eps)
-    log_weights = -shifted / temperature
-    log_weights -= np.max(log_weights)
+    log_weights = -np.asarray(scores, dtype=np.float64)
+    log_weights -= logsumexp(log_weights)
     weights = np.exp(log_weights)
-    weights /= weights.sum()
-    entropy = float(-np.sum(weights * np.log(np.maximum(weights, 1e-15))))
+    entropy = float(-np.sum(weights * log_weights))
     return entropy, float(np.exp(entropy))
 
 
@@ -154,11 +235,7 @@ def pose_marginalized_initialization(
     identity_prior_probability: float = 0.2,
     seed: int = 0,
 ) -> PoseMarginalizedInitialization:
-    """Search global pose hypotheses and return the best refined atlas state.
-
-    This is an opt-in initializer. It does not alter ``AtlasRegistration``
-    defaults or run automatically during registration.
-    """
+    """Search global pose hypotheses and return the best refined atlas state."""
     source = np.asarray(source, dtype=np.float64)
     target = np.asarray(target, dtype=np.float64)
     modes = np.asarray(modes, dtype=np.float64)
@@ -172,10 +249,24 @@ def pose_marginalized_initialization(
         or len(target) == 0
     ):
         raise ValueError("source and target must have non-empty shape (N, 3)")
+    if not np.isfinite(source).all() or not np.isfinite(target).all():
+        raise ValueError("source and target must be finite")
+    if eigenvalues.ndim != 1 or len(eigenvalues) == 0:
+        raise ValueError("eigenvalues must be a non-empty one-dimensional array")
     if modes.ndim == 3:
         modes = modes.reshape(source.size, modes.shape[2])
     if modes.shape != (source.size, len(eigenvalues)):
         raise ValueError("modes and eigenvalues do not match source")
+    if not np.isfinite(modes).all() or not np.isfinite(eigenvalues).all():
+        raise ValueError("modes and eigenvalues must be finite")
+    if refine_count < 1 or coarse_rank < 1:
+        raise ValueError("refine_count and coarse_rank must be positive")
+    if coarse_iterations < 1 or refine_iterations < 1:
+        raise ValueError("coarse_iterations and refine_iterations must be positive")
+    if lambda_reg < 0:
+        raise ValueError("lambda_reg must be non-negative")
+    if not 0 <= outlier_weight < 1:
+        raise ValueError("outlier_weight must be in [0, 1)")
     if not 0 < identity_prior_probability < 1:
         raise ValueError("identity_prior_probability must be in (0, 1)")
 
@@ -221,28 +312,22 @@ def pose_marginalized_initialization(
         registration.set_initial_similarity(
             rotation, scale, translation, world_units=True
         )
-        _, parameters = registration.register()
-        diagnostics = registration.registration_diagnostics()
-        score = float(diagnostics["objective"]) + (
-            0.5
-            * lambda_reg
-            * float(diagnostics["coefficient_mahalanobis"])
-        ) + prior_cost
-        coarse_results.append((score, prior_cost, parameters))
+        registration.register()
+        coarse_results.append(
+            _candidate_from_registration(registration, lambda_reg, prior_cost)
+        )
 
     identity_result = coarse_results[0]
-    coarse_results.sort(key=lambda result: result[0])
+    coarse_results.sort(key=lambda result: result.score)
     finalists = coarse_results[: min(refine_count, len(coarse_results))]
-    if not any(
-        result[2] is identity_result[2] for result in finalists
-    ):
+    if not any(result is identity_result for result in finalists):
         finalists[-1] = identity_result
 
     refined_target = target[
         _farthest_indices(target, min(refine_target_count, len(target)))
     ]
     refined_results = []
-    for _, prior_cost, initial_parameters in finalists:
+    for initial in finalists:
         registration = AtlasRegistration(
             X=refined_target,
             Y=source,
@@ -261,39 +346,38 @@ def pose_marginalized_initialization(
             dtype=np.float32,
         )
         coefficients = np.zeros(len(eigenvalues), dtype=np.float64)
-        coarse_coefficients = np.asarray(initial_parameters["b"]).reshape(-1)
-        coefficients[: len(coarse_coefficients)] = coarse_coefficients
+        coefficients[: len(initial.coefficients)] = initial.coefficients
         registration.set_initial_state(
             coefficients,
-            initial_parameters["R_world"],
-            initial_parameters["s_world"],
-            initial_parameters["t_world"],
+            initial.rotation,
+            initial.scale,
+            initial.translation,
             world_units=True,
         )
-        _, parameters = registration.register()
-        diagnostics = registration.registration_diagnostics()
-        score = float(diagnostics["objective"]) + (
-            0.5
-            * lambda_reg
-            * float(diagnostics["coefficient_mahalanobis"])
-        ) + prior_cost
-        refined_results.append((score, parameters))
+        registration.register()
+        refined_results.append(
+            _candidate_from_registration(
+                registration,
+                lambda_reg,
+                initial.prior_cost,
+            )
+        )
 
-    refined_results.sort(key=lambda result: result[0])
-    scores = np.asarray([result[0] for result in refined_results])
+    refined_results.sort(key=lambda result: result.score)
+    scores = np.asarray([result.score for result in refined_results])
     entropy, effective = _posterior_summary(scores)
-    best_score, best = refined_results[0]
+    best = refined_results[0]
     margin = (
-        float(refined_results[1][0] - best_score)
+        float(refined_results[1].score - best.score)
         if len(refined_results) > 1
         else np.inf
     )
     return PoseMarginalizedInitialization(
-        coefficients=np.asarray(best["b"]).reshape(-1),
-        rotation=np.asarray(best["R_world"]),
-        scale=float(best["s_world"]),
-        translation=np.asarray(best["t_world"]).reshape(1, 3),
-        score=float(best_score),
+        coefficients=best.coefficients.copy(),
+        rotation=best.rotation.copy(),
+        scale=best.scale,
+        translation=best.translation.copy(),
+        score=best.score,
         score_margin=margin,
         posterior_entropy=entropy,
         effective_hypotheses=effective,

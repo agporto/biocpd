@@ -34,22 +34,6 @@ def gaussian_kernel(X, beta, Y=None):
     return sq_dist
 
 
-def _farthest_indices(points: np.ndarray, count: int) -> np.ndarray:
-    """Select a deterministic farthest-point subset."""
-    points = np.asarray(points, dtype=np.float64)
-    count = min(max(int(count), 1), len(points))
-    centered = points - points.mean(axis=0)
-    first = int(np.argmax(np.einsum("ij,ij->i", centered, centered)))
-    selected = np.empty(count, dtype=int)
-    selected[0] = first
-    minimum_squared = np.sum((points - points[first]) ** 2, axis=1)
-    for index in range(1, count):
-        selected[index] = int(np.argmax(minimum_squared))
-        squared = np.sum((points - points[selected[index]]) ** 2, axis=1)
-        minimum_squared = np.minimum(minimum_squared, squared)
-    return selected
-
-
 
 
 

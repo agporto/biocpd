@@ -169,8 +169,13 @@ class AtlasRegistration(EMRegistration):
         s = s if s>np.finfo(self.dtype).tiny else 1.0
         return (Z - self.t) @ self.R / s
 
+    def _require_unstarted(self) -> None:
+        if self.iteration != 0:
+            raise RuntimeError("initial state must be set before registration starts")
+
     def set_initial_coefficients(self, coefficients: np.ndarray) -> None:
         """Set shape coefficients before registration starts."""
+        self._require_unstarted()
         coefficients = np.asarray(coefficients, dtype=self.dtype)
         if coefficients.size != self.K:
             raise ValueError(
@@ -194,6 +199,7 @@ class AtlasRegistration(EMRegistration):
         world_units: bool = True,
     ) -> None:
         """Set a similarity transform before registration starts."""
+        self._require_unstarted()
         rotation = np.asarray(rotation, dtype=self.dtype)
         translation = np.asarray(translation, dtype=self.dtype).reshape(1, self.D)
         if rotation.shape != (self.D, self.D):
@@ -403,22 +409,6 @@ class AtlasRegistration(EMRegistration):
             "R_world": R_world,
             "s_world": s_world,
             "t_world": t_world,
-        }
-
-    def registration_diagnostics(self) -> Dict[str, Any]:
-        """Return scalar diagnostics for optional initialization strategies."""
-        coefficient_mahalanobis = float(
-            np.sum((self.b.reshape(-1) ** 2) * self.invL)
-        )
-        return {
-            "sigma2": float(self.sigma2),
-            "objective": float(self.q),
-            "objective_diff": float(getattr(self, "q_diff", np.inf)),
-            "sigma_diff": float(getattr(self, "sigma_diff", np.inf)),
-            "b_diff": float(getattr(self, "b_diff", np.inf)),
-            "Np": float(getattr(self, "Np", 0.0)),
-            "coefficient_mahalanobis": coefficient_mahalanobis,
-            "using_sparse": bool(getattr(self, "_use_sparse", False)),
         }
 
     def transformed_points(self, denormalize: bool = True) -> np.ndarray:
