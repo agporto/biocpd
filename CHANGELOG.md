@@ -38,6 +38,14 @@ All notable changes in this fork are documented in this file.
   for all 193 rotation hypotheses and refining against the complete source
   model. Staged coarse pruning and refinement subsampling remain available as
   explicit performance options.
+- Atlas dense posterior accumulation now selects cache-aware blocks and fuses
+  posterior moments without changing the CPD objective. Explicit block sizes
+  remain supported.
+- Atlas registration now offers warm-started matrix-free conjugate gradients
+  for the weighted coefficient system, with residual diagnostics and automatic
+  fallback to the historical Cholesky solve. The direct path now forms the
+  same weighted system through symmetric square-root weights, and Cholesky
+  remains the default.
 
 ### Compatibility
 

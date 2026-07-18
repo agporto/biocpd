@@ -155,6 +155,14 @@ skip it for inputs already known to be aligned.
 - `radius_mode`: optional radius gating in sparse E-step (off by default)
 - `w`: outlier weight (0 ≤ w < 1) in GMM
 - `dtype` (deformable, constrained deformable, atlas): defaults to `np.float32`; set `dtype=np.float64` when you need the extra precision
+- `dense_block_size` (atlas): defaults to a cache-aware block selected from the
+  source and target sizes; pass a positive integer to force a specific block
+- `coefficient_solver` (atlas): `"cholesky"` preserves the historical direct
+  solve, `"cg"` uses a warm-started matrix-free solve for atlases with many
+  modes, and `"auto"` selects CG at `coefficient_auto_threshold` modes
+- `coefficient_tolerance`, `coefficient_max_iterations` (atlas): control the CG
+  residual target and iteration budget; failures fall back to Cholesky and are
+  reported through `coefficient_solver_diagnostics`
 - `normalize` (atlas): improves stability across scales
 - `mean_shape` (atlas): with `normalize=True`, pass `mean_shape` as `(M, D)`
 

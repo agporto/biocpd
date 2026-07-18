@@ -279,7 +279,7 @@ def test_atlas_dense_blocked_stats_match_reference():
     assert np.isclose(reg.Np, Np_ref, atol=tol, rtol=tol)
 
 
-def test_atlas_default_dense_block_size_targets_5000():
+def test_atlas_default_dense_block_size_is_cache_aware():
     rng = np.random.default_rng(5)
     M, D, K = 6000, 3, 2
     X = rng.normal(size=(M, D))
@@ -296,7 +296,7 @@ def test_atlas_default_dense_block_size_targets_5000():
         dense_block_size=None,
         max_iterations=1,
     )
-    assert reg._get_dense_block_size() == 5000
+    assert reg._get_dense_block_size() == 128
 
 
 def test_atlas_float32_dtype_is_preserved_internals():
