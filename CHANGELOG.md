@@ -38,6 +38,8 @@ All notable changes in this fork are documented in this file.
   for all 193 rotation hypotheses and refining against the complete source
   model. Staged coarse pruning and refinement subsampling remain available as
   explicit performance options.
+- Pose initialization now defaults to `lambda_reg=0.1` and
+  `outlier_weight=0.05`, matching the validated real-data configuration.
 - Coarse pose finalist selection now uses an Atlas-local E-step trajectory
   objective by default, while refined finalists retain exact full-source
   likelihood scoring. `coarse_score_mode="final"` restores final-state coarse

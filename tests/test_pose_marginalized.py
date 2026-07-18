@@ -213,6 +213,8 @@ def test_pose_search_defaults_use_exhaustive_coarse_and_full_source():
     config = PoseMarginalizedConfig()
     signature = inspect.signature(pose_marginalized_initialization)
 
+    assert config.lambda_reg == 0.1
+    assert config.outlier_weight == 0.05
     assert config.coarse_screen_iterations == config.coarse_iterations == 8
     assert config.coarse_survivor_count == config.rotation_count == 193
     assert config.coarse_score_mode == "trajectory"
@@ -221,6 +223,8 @@ def test_pose_search_defaults_use_exhaustive_coarse_and_full_source():
     assert signature.parameters["coarse_survivor_count"].default == 193
     assert signature.parameters["coarse_score_mode"].default == "trajectory"
     assert signature.parameters["refine_source_count"].default is None
+    assert signature.parameters["lambda_reg"].default == 0.1
+    assert signature.parameters["outlier_weight"].default == 0.05
 
 
 def test_coarse_trajectory_scoring_is_isolated_from_exact_final_scoring(

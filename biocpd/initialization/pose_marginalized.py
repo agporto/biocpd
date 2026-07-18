@@ -47,8 +47,8 @@ class PoseMarginalizedConfig:
     refine_source_count: Optional[int] = None
     refine_target_count: int = 1600
     refine_iterations: int = 30
-    lambda_reg: float = 0.01
-    outlier_weight: float = 0.1
+    lambda_reg: float = 0.1
+    outlier_weight: float = 0.05
     identity_prior_probability: float = 0.2
     seed: int = 0
     n_jobs: int = 1
@@ -355,8 +355,8 @@ def pose_marginalized_initialization(
     refine_source_count: Optional[int] = None,
     refine_target_count: int = 1600,
     refine_iterations: int = 30,
-    lambda_reg: float = 0.01,
-    outlier_weight: float = 0.1,
+    lambda_reg: float = 0.1,
+    outlier_weight: float = 0.05,
     identity_prior_probability: float = 0.2,
     seed: int = 0,
     n_jobs: int = 1,

@@ -130,6 +130,9 @@ initial = pose_marginalized_initialization(
 ```
 
 `rotation_count` is the exact total hypothesis budget, including identity.
+The pose coefficient regularization and outlier defaults are
+`lambda_reg=0.1` and `outlier_weight=0.05`, matching the validated real-data
+configuration.
 By default, every coarse hypothesis receives all eight coarse EM iterations
 (`coarse_screen_iterations=coarse_iterations=8` and
 `coarse_survivor_count=rotation_count=193`). Set a smaller screen iteration
