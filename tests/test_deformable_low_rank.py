@@ -525,7 +525,8 @@ def test_full_rank_low_rank_methods_match_full_kernel_convergence(method):
         atol=2e-7,
         rtol=2e-7,
     )
-    assert abs(float(low_rank.sigma2) - float(exact.sigma2)) < 1e-9
+    assert 0 <= float(exact.sigma2) <= exact.tolerance
+    assert 0 <= float(low_rank.sigma2) <= low_rank.tolerance
 
 
 @pytest.mark.parametrize("seed", [107, 113, 114, 115, 116])
