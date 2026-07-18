@@ -42,6 +42,7 @@ class PoseMarginalizedConfig:
     coarse_iterations: int = 8
     coarse_screen_iterations: int = 8
     coarse_survivor_count: int = 193
+    coarse_score_mode: str = "trajectory"
     refine_count: int = 12
     refine_source_count: Optional[int] = None
     refine_target_count: int = 1600
@@ -72,6 +73,7 @@ class PoseMarginalizedConfig:
             coarse_iterations=self.coarse_iterations,
             coarse_screen_iterations=self.coarse_screen_iterations,
             coarse_survivor_count=self.coarse_survivor_count,
+            coarse_score_mode=self.coarse_score_mode,
             refine_count=self.refine_count,
             refine_source_count=self.refine_source_count,
             refine_target_count=self.refine_target_count,
@@ -244,8 +246,9 @@ def _candidate_from_registration(
     lambda_reg: float,
     prior_cost: float,
     *,
-    score_source: np.ndarray | None = None,
-    score_modes: np.ndarray | None = None,
+    data_cost: Optional[float] = None,
+    score_source: Optional[np.ndarray] = None,
+    score_modes: Optional[np.ndarray] = None,
 ) -> _Candidate:
     """Capture and score a completed atlas registration without changing it."""
     parameters = registration.get_registration_parameters()
@@ -273,13 +276,14 @@ def _candidate_from_registration(
             score_points = (
                 score_points - registration.target_centroid
             ) / registration.target_scale
-    data_cost = _dense_data_objective(
-        registration.X,
-        score_points,
-        registration.sigma2,
-        registration.w,
-        registration._get_dense_block_size(),
-    )
+    if data_cost is None:
+        data_cost = _dense_data_objective(
+            registration.X,
+            score_points,
+            registration.sigma2,
+            registration.w,
+            registration._get_dense_block_size(),
+        )
     shape_cost = 0.5 * lambda_reg * float(
         np.sum(coefficients * coefficients * registration.invL)
     )
@@ -346,6 +350,7 @@ def pose_marginalized_initialization(
     coarse_iterations: int = 8,
     coarse_screen_iterations: int = 8,
     coarse_survivor_count: int = 193,
+    coarse_score_mode: str = "trajectory",
     refine_count: int = 12,
     refine_source_count: Optional[int] = None,
     refine_target_count: int = 1600,
@@ -395,6 +400,10 @@ def pose_marginalized_initialization(
         raise ValueError(
             "coarse_survivor_count must cover the requested finalists"
         )
+    if coarse_score_mode not in {"trajectory", "final"}:
+        raise ValueError(
+            "coarse_score_mode must be 'trajectory' or 'final'"
+        )
     if refine_source_count is not None and refine_source_count < 1:
         raise ValueError("refine_source_count must be positive or None")
     if refine_target_count < 1:
@@ -417,6 +426,22 @@ def pose_marginalized_initialization(
     nonidentity_prior = (1.0 - identity_prior_probability) / max(
         len(rotations) - 1, 1
     )
+
+    def coarse_candidate(
+        registration: AtlasRegistration,
+        prior_cost: float,
+    ) -> _Candidate:
+        data_cost = (
+            registration.expectation_objective
+            if coarse_score_mode == "trajectory"
+            else None
+        )
+        return _candidate_from_registration(
+            registration,
+            lambda_reg,
+            prior_cost,
+            data_cost=data_cost,
+        )
 
     def screen_rotation(rotation_item):
         rotation_index, rotation = rotation_item
@@ -451,11 +476,7 @@ def pose_marginalized_initialization(
         )
         registration.register(callback=None)
         return (
-            _candidate_from_registration(
-                registration,
-                lambda_reg,
-                prior_cost,
-            ),
+            coarse_candidate(registration, prior_cost),
             registration,
         )
 
@@ -489,9 +510,8 @@ def pose_marginalized_initialization(
         ):
             registration.max_iterations = coarse_iterations
             registration.register(callback=None)
-            return _candidate_from_registration(
+            return coarse_candidate(
                 registration,
-                lambda_reg,
                 screened_result.prior_cost,
             )
         return screened_result

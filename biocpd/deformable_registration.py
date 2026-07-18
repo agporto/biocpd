@@ -109,6 +109,15 @@ class DeformableRegistration(EMRegistration):
         self.W = np.zeros((self.M, self.D), dtype=self.dtype)
         self._low_rank_coefficients = None
         self._low_rank_coefficients_current = False
+        centered_target = self.X - np.mean(self.X, axis=0)
+        target_variance = float(
+            np.mean(np.sum(centered_target * centered_target, axis=1))
+            / self.D
+        )
+        self._variance_floor = max(
+            np.finfo(self.dtype).eps * target_variance,
+            np.finfo(self.dtype).tiny,
+        )
 
         # Pre-compute Gaussian kernel or its low-rank approximation.
         if self.low_rank:
@@ -129,6 +138,15 @@ class DeformableRegistration(EMRegistration):
                 )
             )
             self._inv_S_values = 1.0 / self._S_values
+            self._sqrt_low_rank_weights = np.empty(
+                self.M,
+                dtype=self.dtype,
+            )
+            self._weighted_low_rank_basis = np.empty_like(self.Q)
+            self._low_rank_projection = np.empty(
+                (self.M, self.D),
+                dtype=self.dtype,
+            )
             # Preserve the historical public factor representation and return
             # contract while using vector forms for internal arithmetic.
             self.S = np.diag(self._S_values)
@@ -233,8 +251,19 @@ class DeformableRegistration(EMRegistration):
 
     def _update_low_rank_transform(self, weights, F, lambda_val):
         """Solve a low-rank CPD M-step and cache deformation coefficients."""
-        weighted_basis = weights[:, np.newaxis] * self.Q
-        system = self.Q.T @ weighted_basis
+        # Q' diag(weights) Q is a Gram matrix.  Expressing it through the
+        # square-root weighted basis lets optimized BLAS use its A.T @ A path
+        # and guarantees a positive-semidefinite system up to roundoff.
+        np.sqrt(weights, out=self._sqrt_low_rank_weights)
+        np.multiply(
+            self.Q,
+            self._sqrt_low_rank_weights[:, np.newaxis],
+            out=self._weighted_low_rank_basis,
+        )
+        system = (
+            self._weighted_low_rank_basis.T
+            @ self._weighted_low_rank_basis
+        )
         diagonal = np.diag_indices_from(system)
         system[diagonal] += lambda_val * self._inv_S_values
         rhs = self.Q.T @ F
@@ -242,7 +271,7 @@ class DeformableRegistration(EMRegistration):
         try:
             factor = cho_factor(
                 system,
-                overwrite_a=False,
+                overwrite_a=True,
                 check_finite=False,
             )
             coefficients = cho_solve(
@@ -252,13 +281,49 @@ class DeformableRegistration(EMRegistration):
                 check_finite=False,
             )
         except np.linalg.LinAlgError:
-            # This system is positive definite analytically. Retain a general
-            # solve as a numerical fallback for unusually ill-conditioned data.
-            coefficients = np.linalg.solve(system, rhs)
+            # Rebuild after the failed in-place factorization and add a
+            # scale-aware diagonal perturbation.  The analytical system is
+            # positive definite; this only protects degenerate finite-precision
+            # factorizations without changing the ordinary solve.
+            system = (
+                self._weighted_low_rank_basis.T
+                @ self._weighted_low_rank_basis
+            )
+            system[diagonal] += lambda_val * self._inv_S_values
+            diagonal_scale = max(
+                float(np.max(np.abs(np.diag(system)))),
+                1.0,
+            )
+            system[diagonal] += max(
+                1e-8,
+                np.finfo(self.dtype).eps * diagonal_scale,
+            )
+            factor = cho_factor(
+                system,
+                overwrite_a=True,
+                check_finite=False,
+            )
+            coefficients = cho_solve(
+                factor,
+                rhs,
+                overwrite_b=True,
+                check_finite=False,
+            )
 
         self._low_rank_coefficients = coefficients
         self._low_rank_coefficients_current = True
-        self.W = (F - weighted_basis @ coefficients) / lambda_val
+        np.matmul(
+            self.Q,
+            coefficients,
+            out=self._low_rank_projection,
+        )
+        np.multiply(
+            weights[:, np.newaxis],
+            self._low_rank_projection,
+            out=self._low_rank_projection,
+        )
+        np.subtract(F, self._low_rank_projection, out=self.W)
+        self.W /= lambda_val
 
     def transform_point_cloud(self, Y=None):
         """
@@ -313,8 +378,11 @@ class DeformableRegistration(EMRegistration):
 
         self.sigma2 = (xPx - 2 * trPXY + yPy) / (self.Np * self.D)
 
-        if self.sigma2 <= 0:
-            self.sigma2 = self.tolerance / 10.
+        if not np.isfinite(self.sigma2) or self.sigma2 <= 0:
+            self.sigma2 = max(
+                self.tolerance / 10.0,
+                self._variance_floor,
+            )
         self.diff = abs(self.sigma2 - qprev)
 
     def get_registration_parameters(self):

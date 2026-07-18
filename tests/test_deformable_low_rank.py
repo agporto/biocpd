@@ -96,6 +96,135 @@ def test_coefficient_space_update_matches_legacy_woodbury_algebra(
     )
 
 
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("lambda_value", [0.03, 4.0])
+def test_sqrt_weighted_low_rank_update_handles_zero_dynamic_weights(
+    dtype,
+    lambda_value,
+):
+    generator = np.random.default_rng(116)
+    source = generator.normal(size=(52, 3)).astype(dtype)
+    registration = DeformableRegistration(
+        X=source + dtype(0.01),
+        Y=source,
+        low_rank=True,
+        num_eig=18,
+        low_rank_method="pivoted_cholesky",
+        use_kdtree=False,
+        dtype=dtype,
+        max_iterations=0,
+    )
+    weights = np.geomspace(1e-5, 2.0, len(source)).astype(dtype)
+    weights[::7] = 0
+    F = generator.normal(size=source.shape).astype(dtype)
+    lambda_value = dtype(lambda_value)
+    system = registration.Q.T @ (weights[:, None] * registration.Q)
+    system[np.diag_indices(registration.num_eig)] += (
+        lambda_value * registration._inv_S_values
+    )
+    rhs = registration.Q.T @ F
+
+    registration._update_low_rank_transform(weights, F, lambda_value)
+    relative_residual = np.linalg.norm(
+        system @ registration._low_rank_coefficients - rhs
+    ) / max(np.linalg.norm(rhs), np.finfo(dtype).tiny)
+    tolerance = 8e-4 if dtype == np.float32 else 2e-11
+
+    assert relative_residual < tolerance
+    assert np.isfinite(registration.W).all()
+
+
+def test_zero_tolerance_deformable_variance_remains_positive():
+    source = _deformable_problem(117, point_count=24)[0]
+    registration = DeformableRegistration(
+        X=source.copy(),
+        Y=source,
+        low_rank=True,
+        num_eig=12,
+        low_rank_method="pivoted_cholesky",
+        use_kdtree=False,
+        dtype=np.float64,
+        tolerance=0.0,
+        max_iterations=0,
+    )
+    registration.Pt1 = np.ones(registration.N)
+    registration.P1 = np.ones(registration.M)
+    registration.PX = source.copy()
+    registration.Np = float(registration.N)
+    registration.TY = source.copy()
+    registration.sigma2 = 1.0
+
+    registration.update_variance()
+
+    assert np.isfinite(registration.sigma2)
+    assert registration.sigma2 > 0
+
+
+def test_constrained_prior_matrix_is_lazy_and_preserves_binary_pairs():
+    source, target, beta = _deformable_problem(118, point_count=28)
+    source_id = np.array([0, 0, 3, 7, 7])
+    target_id = np.array([1, 1, 5, 9, 10])
+    registration = ConstrainedDeformableRegistration(
+        X=target,
+        Y=source,
+        source_id=source_id,
+        target_id=target_id,
+        beta=beta,
+        low_rank=True,
+        num_eig=12,
+        low_rank_method="pivoted_cholesky",
+        use_kdtree=False,
+        max_iterations=0,
+    )
+    expected = np.zeros((len(source), len(target)), dtype=np.float32)
+    expected[source_id, target_id] = 1
+
+    assert registration._P_tilde is None
+    np.testing.assert_array_equal(registration.P1_tilde, expected.sum(axis=1))
+    np.testing.assert_allclose(
+        registration.PX_tilde,
+        expected @ target,
+        atol=2e-7,
+        rtol=2e-7,
+    )
+    np.testing.assert_array_equal(registration.P_tilde, expected)
+
+    replacement = np.full_like(expected, 0.25)
+    registration.P_tilde = replacement
+    np.testing.assert_array_equal(registration.P_tilde, replacement)
+
+
+@pytest.mark.parametrize(
+    "source_id,target_id,match",
+    [
+        (np.array([0.0]), np.array([0]), "integer"),
+        (np.array([0]), np.array([0.0]), "integer"),
+        (np.array([0, 1]), np.array([0]), "same length"),
+        (np.array([-1]), np.array([0]), "out of bounds"),
+        (np.array([0]), np.array([24]), "out of bounds"),
+    ],
+)
+def test_constrained_prior_indices_are_validated(
+    source_id,
+    target_id,
+    match,
+):
+    source, target, beta = _deformable_problem(119, point_count=24)
+
+    with pytest.raises(ValueError, match=match):
+        ConstrainedDeformableRegistration(
+            X=target,
+            Y=source,
+            source_id=source_id,
+            target_id=target_id,
+            beta=beta,
+            low_rank=True,
+            num_eig=8,
+            use_kdtree=False,
+            max_iterations=0,
+        )
+
+
 def test_public_transform_respects_an_explicitly_replaced_W():
     generator = np.random.default_rng(101)
     source = generator.normal(size=(35, 3))

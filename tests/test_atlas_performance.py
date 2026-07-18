@@ -119,6 +119,16 @@ def test_fused_atlas_dense_statistics_match_dense_reference(
         / registration.N
     )
     denominator = np.sum(posterior, axis=0, keepdims=True) + outlier
+    expectation_objective = (
+        0.5
+        * registration.N
+        * registration.D
+        * np.log(2.0 * np.pi * dtype(sigma2))
+        - np.sum(
+            np.log(np.maximum(denominator, np.finfo(dtype).tiny)),
+            dtype=np.float64,
+        )
+    )
     posterior /= np.maximum(denominator, np.finfo(dtype).tiny)
     tolerance = 2e-5 if dtype == np.float32 else 2e-12
 
@@ -155,6 +165,13 @@ def test_fused_atlas_dense_statistics_match_dense_reference(
         )
     else:
         assert registration.P is None
+    objective_tolerance = 2e-4 if dtype == np.float32 else 2e-11
+    assert np.isclose(
+        registration.expectation_objective,
+        expectation_objective,
+        atol=objective_tolerance,
+        rtol=objective_tolerance,
+    )
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])

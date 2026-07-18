@@ -136,8 +136,13 @@ By default, every coarse hypothesis receives all eight coarse EM iterations
 count and survivor count to opt into staged pruning. Refinement uses the full
 source model by default (`refine_source_count=None`) and at most
 `refine_target_count` target points; every finalist is scored against the
-complete source model. Set `n_jobs` above 1 (or to -1 for all detected CPUs)
-to evaluate independent hypotheses concurrently.
+complete source model. Coarse hypotheses use the E-step trajectory objective
+by default (`coarse_score_mode="trajectory"`), which is less sensitive to a
+single final coordinate update on symmetric shapes; refined finalists are
+always ranked with the exact full-source likelihood. Set
+`coarse_score_mode="final"` to recover final-state coarse scoring. Set
+`n_jobs` above 1 (or to -1 for all detected CPUs) to evaluate independent
+hypotheses concurrently.
 
 Pose initialization adds computation before the final atlas registration. Use
 it when global orientation is uncertain or severe misalignment is expected;
@@ -152,6 +157,9 @@ skip it for inputs already known to be aligned.
 - `low_rank_tolerance` (deformable): optional residual-diagonal stopping
   tolerance for pivoted Cholesky; the default `0.0` uses the requested rank
   unless the kernel becomes numerically rank deficient
+- Low-rank deformable M-steps form their weighted coefficient system as a
+  square-root-weighted Gram matrix. This is exact, applies to constrained and
+  unconstrained registration, and requires no additional option.
 - `radius_mode`: optional radius gating in sparse E-step (off by default)
 - `w`: outlier weight (0 ≤ w < 1) in GMM
 - `dtype` (deformable, constrained deformable, atlas): defaults to `np.float32`; set `dtype=np.float64` when you need the extra precision

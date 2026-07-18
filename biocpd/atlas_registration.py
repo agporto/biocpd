@@ -223,6 +223,7 @@ class AtlasRegistration(EMRegistration):
         self._X_augmented[:, 0] = 1
         self._X_augmented[:, 1:] = self.X
         self._basis_norm_squared = None
+        self.expectation_objective = np.inf
         self.coefficient_solver_diagnostics = {
             "requested_method": self.coefficient_solver,
             "last_method": None,
@@ -283,6 +284,7 @@ class AtlasRegistration(EMRegistration):
             if store_p
             else None
         )
+        log_denominator_sum = 0.0
         target_mass = np.zeros(self.N, dtype=self.dtype)
         source_mass = np.zeros(self.M, dtype=self.dtype)
         source_target_sum = np.zeros((self.M, self.D), dtype=self.dtype)
@@ -301,6 +303,9 @@ class AtlasRegistration(EMRegistration):
             kernel_sum = np.sum(weights, axis=0)
             denominator = kernel_sum + outlier
             np.maximum(denominator, self._tiny, out=denominator)
+            log_denominator_sum += float(
+                np.sum(np.log(denominator), dtype=np.float64)
+            )
             target_mass[start:stop] = kernel_sum / denominator
             weights /= denominator[None, :]
 
@@ -315,6 +320,17 @@ class AtlasRegistration(EMRegistration):
         self.P1 = source_mass
         self.Np = float(source_mass.sum())
         self.PX = source_target_sum
+        # This is the CPD data objective at the state used by the E-step,
+        # up to an additive constant that is identical across hypotheses with
+        # the same M, N, and outlier weight.  Keep it Atlas-local: the shared
+        # EM ``q`` contract and convergence state remain untouched.
+        self.expectation_objective = float(
+            0.5
+            * self.N
+            * self.D
+            * np.log(2.0 * np.pi * self.sigma2)
+            - log_denominator_sum
+        )
 
     def _denormalize(self, pts: np.ndarray) -> np.ndarray:
         return pts*self.target_scale + self.target_centroid if self.normalize else pts
@@ -424,6 +440,14 @@ class AtlasRegistration(EMRegistration):
         den += c
         np.maximum(den, self._tiny, out=den)
 
+        self.expectation_objective = float(
+            0.5
+            * self.N
+            * self.D
+            * np.log(2.0 * np.pi * self.sigma2)
+            - np.sum(np.log(den), dtype=np.float64)
+        )
+
         norm_weights = (weights / den[cols]).astype(self.dtype, copy=False)
         self.P = csr_matrix((norm_weights, (rows, cols)), shape=(self.M, self.N)) if self.store_posterior else None
         self.Pt1 = np.bincount(cols, weights=norm_weights, minlength=self.N).astype(self.dtype, copy=False)
@@ -479,19 +503,25 @@ class AtlasRegistration(EMRegistration):
     def _weighted_similarity_update(self, Yb: np.ndarray, xbar: Optional[np.ndarray] = None) -> Tuple[np.ndarray, float, np.ndarray]:
         tiny = np.finfo(self.dtype).tiny
         w = self.P1; wsum = max(self.Np, tiny)
-        if xbar is None:
-            xbar = self.PX / np.maximum(w[:, None], tiny)
-        mu_x = (w[:,None]*xbar).sum(axis=0, keepdims=True)/wsum
-        mu_y = (w[:,None]*Yb ).sum(axis=0, keepdims=True)/wsum
-        Xc = xbar - mu_x; Yc = Yb - mu_y
-        C = (Yc.T * w).dot(Xc)
+        weighted_x = (
+            self.PX
+            if xbar is None
+            else w[:, None] * xbar
+        )
+        mu_x = np.sum(weighted_x, axis=0, keepdims=True) / wsum
+        mu_y = (w @ Yb).reshape(1, self.D) / wsum
+        C = Yb.T @ weighted_x - wsum * (mu_y.T @ mu_x)
         U, S, Vt = np.linalg.svd(C, full_matrices=False)
         M = np.eye(self.D, dtype=self.dtype); M[-1,-1] = np.sign(np.linalg.det(U@Vt))
         A = U @ M @ Vt
         R = A.T
         if self.with_scale:
             num = np.trace(A.T @ C)
-            den = float((w * (Yc*Yc).sum(axis=1)).sum()); s = float(num / max(den, tiny))
+            den = float(
+                w @ np.sum(Yb * Yb, axis=1)
+                - wsum * np.sum(mu_y * mu_y)
+            )
+            s = float(num / max(den, tiny))
         else:
             s = self.dtype.type(1.0)
         t = mu_x - s*(mu_y @ R.T)
@@ -683,7 +713,7 @@ class AtlasRegistration(EMRegistration):
         self._deformation[:] = self.U_flat.dot(self.b).reshape(self.M, self.D)
         Yb = self.Y + self._deformation
         if self.optimize_similarity:
-            R, s, t = self._weighted_similarity_update(Yb, xbar=xbar)
+            R, s, t = self._weighted_similarity_update(Yb)
             self.R = R; self.s = float(s if self.with_scale else 1.0); self.t = t
             TY = self._apply_similarity(Yb)
         else:

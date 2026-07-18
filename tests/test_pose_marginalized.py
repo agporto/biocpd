@@ -70,6 +70,24 @@ def test_dense_expectation_does_not_mutate_legacy_q(registration_class):
     assert registration.q == 17.25
 
 
+def test_atlas_trajectory_objective_is_isolated_from_legacy_q():
+    source = _asymmetric_cloud(seed=23, count=24)
+    registration = AtlasRegistration(
+        X=source + np.array([0.2, -0.1, 0.05]),
+        Y=source,
+        U=np.zeros((source.size, 1)),
+        eigenvalues=np.ones(1),
+        use_kdtree=False,
+        max_iterations=1,
+    )
+    registration.q = 17.25
+
+    registration.expectation()
+
+    assert registration.q == 17.25
+    assert np.isfinite(registration.expectation_objective)
+
+
 @pytest.mark.parametrize("registration_class", [RigidRegistration, AffineRegistration])
 def test_dense_first_iteration_preserves_legacy_convergence_history(
     registration_class,
@@ -197,10 +215,87 @@ def test_pose_search_defaults_use_exhaustive_coarse_and_full_source():
 
     assert config.coarse_screen_iterations == config.coarse_iterations == 8
     assert config.coarse_survivor_count == config.rotation_count == 193
+    assert config.coarse_score_mode == "trajectory"
     assert config.refine_source_count is None
     assert signature.parameters["coarse_screen_iterations"].default == 8
     assert signature.parameters["coarse_survivor_count"].default == 193
+    assert signature.parameters["coarse_score_mode"].default == "trajectory"
     assert signature.parameters["refine_source_count"].default is None
+
+
+def test_coarse_trajectory_scoring_is_isolated_from_exact_final_scoring(
+    monkeypatch,
+):
+    source = _asymmetric_cloud(seed=33, count=18)
+    target = source + np.array([0.2, -0.1, 0.05])
+    modes = np.zeros((source.size, 1))
+    calls = []
+    original = pose_module._candidate_from_registration
+
+    def recording_candidate(registration, *args, **kwargs):
+        calls.append(
+            (
+                kwargs.get("data_cost"),
+                kwargs.get("score_source") is not None,
+            )
+        )
+        return original(registration, *args, **kwargs)
+
+    monkeypatch.setattr(
+        pose_module,
+        "_candidate_from_registration",
+        recording_candidate,
+    )
+    common = dict(
+        source=source,
+        target=target,
+        modes=modes,
+        eigenvalues=np.ones(1),
+        rotation_count=3,
+        coarse_source_count=12,
+        coarse_target_count=12,
+        coarse_rank=1,
+        coarse_iterations=1,
+        coarse_screen_iterations=1,
+        coarse_survivor_count=3,
+        refine_count=1,
+        refine_source_count=None,
+        refine_target_count=18,
+        refine_iterations=1,
+    )
+    pose_marginalized_initialization(**common)
+
+    coarse_calls = [call for call in calls if not call[1]]
+    refined_calls = [call for call in calls if call[1]]
+    assert len(coarse_calls) == 3
+    assert all(np.isfinite(data_cost) for data_cost, _ in coarse_calls)
+    assert refined_calls == [(None, True)]
+
+    calls.clear()
+    pose_marginalized_initialization(
+        **common,
+        coarse_score_mode="final",
+    )
+    assert all(data_cost is None for data_cost, _ in calls)
+
+
+def test_invalid_coarse_score_mode_is_rejected():
+    source = _asymmetric_cloud(seed=34, count=8)
+    with pytest.raises(ValueError, match="coarse_score_mode"):
+        pose_marginalized_initialization(
+            source,
+            source.copy(),
+            np.zeros((source.size, 1)),
+            np.ones(1),
+            rotation_count=1,
+            coarse_rank=1,
+            coarse_iterations=1,
+            coarse_screen_iterations=1,
+            coarse_survivor_count=1,
+            coarse_score_mode="unknown",
+            refine_count=1,
+            refine_iterations=1,
+        )
 
 
 def test_full_source_refinement_preserves_all_source_points(monkeypatch):
@@ -370,6 +465,33 @@ def test_pose_candidate_scoring_is_pure_and_uses_final_state():
     np.testing.assert_array_equal(registration.R, state["R"])
     np.testing.assert_array_equal(registration.t, state["t"])
     np.testing.assert_array_equal(registration.TY, state["TY"])
+
+
+def test_pose_candidate_accepts_a_precomputed_data_cost():
+    source = _asymmetric_cloud(seed=35, count=16)
+    registration = AtlasRegistration(
+        X=source.copy(),
+        Y=source,
+        U=np.zeros((source.size, 1)),
+        eigenvalues=np.ones(1),
+        lambda_reg=0.1,
+        normalize=True,
+        use_kdtree=False,
+        dtype=np.float64,
+        max_iterations=1,
+        tolerance=0.0,
+    )
+    registration.register(callback=None)
+    candidate = _candidate_from_registration(
+        registration,
+        0.1,
+        0.7,
+        data_cost=12.5,
+    )
+    expected_shape = 0.05 * np.sum(
+        candidate.coefficients**2 * registration.invL
+    )
+    assert np.isclose(candidate.score, 12.5 + expected_shape + 0.7)
 
 
 def test_pose_candidate_can_score_a_full_source_after_subset_fitting():

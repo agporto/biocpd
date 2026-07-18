@@ -38,6 +38,11 @@ All notable changes in this fork are documented in this file.
   for all 193 rotation hypotheses and refining against the complete source
   model. Staged coarse pruning and refinement subsampling remain available as
   explicit performance options.
+- Coarse pose finalist selection now uses an Atlas-local E-step trajectory
+  objective by default, while refined finalists retain exact full-source
+  likelihood scoring. `coarse_score_mode="final"` restores final-state coarse
+  scoring. The shared `EMRegistration.q` and convergence contracts remain
+  untouched.
 - Atlas dense posterior accumulation now selects cache-aware blocks and fuses
   posterior moments without changing the CPD objective. Explicit block sizes
   remain supported.
@@ -46,6 +51,18 @@ All notable changes in this fork are documented in this file.
   fallback to the historical Cholesky solve. The direct path now forms the
   same weighted system through symmetric square-root weights, and Cholesky
   remains the default.
+- Low-rank deformable coefficient systems now use square-root-weighted Gram
+  formation and cached work buffers. Constrained correspondence moments are
+  accumulated directly; the historical dense `P_tilde` matrix is created only
+  if callers access it.
+
+### Performance
+
+- Moment-based Atlas similarity updates avoid centered point-cloud
+  temporaries while preserving weighted Procrustes algebra.
+- On the bundled real-data benchmarks with one BLAS thread, square-root
+  low-rank deformable M-steps reduced 30-iteration molar fitting from 0.516 s
+  to 0.248 s and 45-iteration vertebra fitting from 1.422 s to 0.607 s.
 
 ### Compatibility
 
