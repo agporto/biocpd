@@ -39,12 +39,14 @@ def run_case(name: str, X, Y, U, L, args, **kwargs):
         w=0.0,
         dense_block_size=args.dense_block_size,
         store_posterior=False,
+        coefficient_solver=args.coefficient_solver,
         **kwargs,
     )
 
     start = time.perf_counter()
     TY, params = reg.register()
     elapsed = time.perf_counter() - start
+    solver_diagnostics = reg.coefficient_solver_diagnostics
 
     return {
         "name": name,
@@ -56,6 +58,9 @@ def run_case(name: str, X, Y, U, L, args, **kwargs):
         "R": params["R"],
         "s": float(params["s"]),
         "t": params["t"],
+        "solver": solver_diagnostics["last_method"],
+        "cg_iterations": solver_diagnostics["last_iterations"],
+        "fallbacks": solver_diagnostics["fallback_count"],
     }
 
 
@@ -87,6 +92,12 @@ def main():
     parser.add_argument("--max-iterations", type=int, default=25, help="Maximum EM iterations.")
     parser.add_argument("--tolerance", type=float, default=1e-6, help="EM tolerance.")
     parser.add_argument("--dense-block-size", type=int, default=None, help="Optional dense E-step block size.")
+    parser.add_argument(
+        "--coefficient-solver",
+        choices=("cholesky", "cg", "auto"),
+        default="cholesky",
+        help="Atlas coefficient solver.",
+    )
     parser.add_argument("--point-delta-tol", type=float, default=0.10, help="Dense-vs-candidate RMS point delta tolerance.")
     parser.add_argument("--b-delta-tol", type=float, default=1.0, help="Dense-vs-candidate coefficient norm tolerance.")
     parser.add_argument("--r-delta-tol", type=float, default=0.10, help="Dense-vs-candidate rotation max-abs tolerance.")
@@ -106,7 +117,8 @@ def main():
     dense = results[0]
 
     header = (
-        f"{'config':<18} {'time_s':>8} {'iters':>5} {'sigma2':>10} {'sig2_d':>10} "
+        f"{'config':<18} {'solver':>9} {'cg_it':>5} {'fb':>3} "
+        f"{'time_s':>8} {'iters':>5} {'sigma2':>10} {'sig2_d':>10} "
         f"{'point_d':>10} {'b_d':>10} {'R_d':>10} {'s_d':>10} {'t_d':>10} {'pass':>6}"
     )
     print(header)
@@ -117,7 +129,10 @@ def main():
         else:
             point_delta, b_delta, r_delta, s_delta, t_delta, sigma2_delta, quality_ok = quality_metrics(result, dense, args)
         print(
-            f"{result['name']:<18} {result['elapsed']:>8.3f} {result['iterations']:>5} {result['sigma2']:>10.6f} {sigma2_delta:>10.6f} "
+            f"{result['name']:<18} {result['solver']:>9} "
+            f"{result['cg_iterations']:>5} {result['fallbacks']:>3} "
+            f"{result['elapsed']:>8.3f} {result['iterations']:>5} "
+            f"{result['sigma2']:>10.6f} {sigma2_delta:>10.6f} "
             f"{point_delta:>10.6f} {b_delta:>10.6f} {r_delta:>10.6f} {s_delta:>10.6f} {t_delta:>10.6f} {str(quality_ok):>6}"
         )
 

@@ -40,14 +40,56 @@ class ConstrainedDeformableRegistration(DeformableRegistration):
         if type(target_id) is not np.ndarray or target_id.ndim != 1:
             raise ValueError(
                 "The target ids (target_id) must be a 1D numpy array of ints.")
+        if not np.issubdtype(source_id.dtype, np.integer):
+            raise ValueError("source_id must contain integer indices.")
+        if not np.issubdtype(target_id.dtype, np.integer):
+            raise ValueError("target_id must contain integer indices.")
+        if len(source_id) != len(target_id):
+            raise ValueError("source_id and target_id must have the same length.")
+        if (
+            np.any(source_id < 0)
+            or np.any(source_id >= self.M)
+            or np.any(target_id < 0)
+            or np.any(target_id >= self.N)
+        ):
+            raise ValueError("constraint indices are out of bounds.")
 
         self.e_alpha = 1e-8 if e_alpha is None else e_alpha
         self.source_id = source_id
         self.target_id = target_id
-        self.P_tilde = np.zeros((self.M, self.N), dtype=self.dtype)
-        self.P_tilde[self.source_id, self.target_id] = 1
-        self.P1_tilde = np.sum(self.P_tilde, axis=1)
-        self.PX_tilde = np.dot(self.P_tilde, self.X)
+        pairs = np.unique(
+            np.column_stack((self.source_id, self.target_id)),
+            axis=0,
+        )
+        self._constraint_source_id = pairs[:, 0]
+        self._constraint_target_id = pairs[:, 1]
+        self._P_tilde = None
+        self.P1_tilde = np.bincount(
+            self._constraint_source_id,
+            minlength=self.M,
+        ).astype(self.dtype, copy=False)
+        self.PX_tilde = np.zeros((self.M, self.D), dtype=self.dtype)
+        np.add.at(
+            self.PX_tilde,
+            self._constraint_source_id,
+            self.X[self._constraint_target_id],
+        )
+
+    @property
+    def P_tilde(self):
+        """Return the historical dense constraint matrix, built on demand."""
+        if self._P_tilde is None:
+            self._P_tilde = np.zeros((self.M, self.N), dtype=self.dtype)
+            self._P_tilde[
+                self._constraint_source_id,
+                self._constraint_target_id,
+            ] = 1
+        return self._P_tilde
+
+    @P_tilde.setter
+    def P_tilde(self, value):
+        """Preserve assignment compatibility for the historical attribute."""
+        self._P_tilde = np.asarray(value, dtype=self.dtype)
 
     def update_transform(self):
         """
@@ -61,15 +103,16 @@ class ConstrainedDeformableRegistration(DeformableRegistration):
             # B = PX - diag(P1)Y + sigma2/e_alpha * (PX_tilde - diag(P1_tilde)Y)
             B = self.PX - (self.P1[:, None] * self.Y) + (self.sigma2 * (1.0 / self.e_alpha)) * (self.PX_tilde - (self.P1_tilde[:, None] * self.Y))
             self.W = np.linalg.solve(A, B)
+            self._low_rank_coefficients = None
+            self._low_rank_coefficients_current = False
 
         elif self.low_rank is True:
             # Vector weights instead of explicit diagonal
             dP_vec = self.P1 + (self.sigma2 * (1.0 / self.e_alpha)) * self.P1_tilde  # (M,)
-            dPQ = (dP_vec[:, None] * self.Q)  # (M, K)
             F = self.PX - (self.P1[:, None] * self.Y) + (self.sigma2 * (1.0 / self.e_alpha)) * (self.PX_tilde - (self.P1_tilde[:, None] * self.Y))
 
-            # Solve via Woodbury
-            M_small = (self.alpha * self.sigma2 * self.inv_S) + (self.Q.T @ dPQ)
-            rhs = (self.Q.T @ F)
-            inner = np.linalg.solve(M_small, rhs)
-            self.W = (1.0 / (self.alpha * self.sigma2)) * (F - dPQ @ inner)
+            self._update_low_rank_transform(
+                dP_vec,
+                F,
+                self.dtype.type(self.alpha * self.sigma2),
+            )

@@ -15,4 +15,9 @@ from .affine_registration import AffineRegistration
 from .deformable_registration import DeformableRegistration
 from .constrained_deformable_registration import ConstrainedDeformableRegistration
 from .atlas_registration import AtlasRegistration
+from .initialization import (
+    PoseMarginalizedConfig,
+    PoseMarginalizedInitialization,
+    pose_marginalized_initialization,
+)
 from .utility import *

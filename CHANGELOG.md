@@ -2,6 +2,75 @@
 
 All notable changes in this fork are documented in this file.
 
+## 1.3.0 - 2026-07-11
+
+### Added
+
+- Added deterministic, opt-in pose-marginalized initialization for
+  `AtlasRegistration`.
+- Added warm-start APIs for atlas coefficients and world-space similarity
+  transforms.
+- Added reusable `PoseMarginalizedConfig` and diagnostic result metadata.
+- Made `rotation_count` the exact hypothesis budget and added staged coarse
+  screening so full coarse EM is reserved for competitive poses.
+- Reworked pose likelihood scoring to reuse the blocked CPD squared-distance
+  algebra, reducing score time and peak working memory without changing the
+  objective.
+- Added bounded source subsampling for finalist optimization, full-source
+  finalist scoring, and deterministic opt-in parallel hypothesis evaluation.
+- Added an opt-in deterministic pivoted-Cholesky Gaussian-kernel factorization
+  for deformable and constrained-deformable CPD. It does not construct the
+  complete `M x M` kernel and reports the achieved rank and maximum residual
+  diagonal through `low_rank_diagnostics`.
+- Added focused algebra, convergence, dtype, degeneracy, and compatibility
+  regression tests for low-rank deformable registration.
+- Added `benchmarks/deformable_low_rank_bench.py` to compare initialization,
+  fitting time, and alignment quality between low-rank methods.
+
+### Changed
+
+- Low-rank deformable M-steps now use Cholesky on the positive-definite
+  coefficient system and transform training points directly from the solved
+  coefficients. The historical `Q`, `S`, and `W` return contract is preserved.
+- Scikit-learn's randomized-SVD implementation is imported lazily when that
+  low-rank method is selected.
+- Pose initialization now defaults to completing all eight coarse iterations
+  for all 193 rotation hypotheses and refining against the complete source
+  model. Staged coarse pruning and refinement subsampling remain available as
+  explicit performance options.
+- Pose initialization now defaults to `lambda_reg=0.1` and
+  `outlier_weight=0.05`, matching the validated real-data configuration.
+- Coarse pose finalist selection now uses an Atlas-local E-step trajectory
+  objective by default, while refined finalists retain exact full-source
+  likelihood scoring. `coarse_score_mode="final"` restores final-state coarse
+  scoring. The shared `EMRegistration.q` and convergence contracts remain
+  untouched.
+- Atlas dense posterior accumulation now selects cache-aware blocks and fuses
+  posterior moments without changing the CPD objective. Explicit block sizes
+  remain supported.
+- Atlas registration now offers warm-started matrix-free conjugate gradients
+  for the weighted coefficient system, with residual diagnostics and automatic
+  fallback to the historical Cholesky solve. The direct path now forms the
+  same weighted system through symmetric square-root weights, and Cholesky
+  remains the default.
+- Low-rank deformable coefficient systems now use square-root-weighted Gram
+  formation and cached work buffers. Constrained correspondence moments are
+  accumulated directly; the historical dense `P_tilde` matrix is created only
+  if callers access it.
+
+### Performance
+
+- Moment-based Atlas similarity updates avoid centered point-cloud
+  temporaries while preserving weighted Procrustes algebra.
+- On the bundled real-data benchmarks with one BLAS thread, square-root
+  low-rank deformable M-steps reduced 30-iteration molar fitting from 0.516 s
+  to 0.248 s and 45-iteration vertebra fitting from 1.422 s to 0.607 s.
+
+### Compatibility
+
+- Existing `AtlasRegistration` constructor defaults, registration behavior, and
+  parameter dictionary remain unchanged when pose initialization is not used.
+
 ## 0.2.0 - 2026-03-12
 
 Changes in this release summarize the full diff between `main` and the current branch.
