@@ -2,6 +2,14 @@
 
 All notable changes in this fork are documented in this file.
 
+## Unreleased
+
+### Added
+
+- Added opt-in weighted similarity optimization to `DeformableRegistration`
+  through `optimize_similarity` and `with_scale`, while preserving the
+  traditional deformable CPD defaults and registration-parameter tuple.
+
 ## 1.3.0 - 2026-07-11
 
 ### Added

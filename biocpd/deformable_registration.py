@@ -45,6 +45,11 @@ class DeformableRegistration(EMRegistration):
         searches.
     radius_mode: bool
         If True, in sparse E-step ignore neighbors beyond a numerically safe radius.
+    optimize_similarity: bool
+        If True, jointly optimize rotation, translation, and optional uniform
+        scale with the non-rigid deformation.
+    with_scale: bool
+        If True, estimate uniform scale when similarity optimization is enabled.
     w: float
         Outlier weight (0 <= w < 1) forwarded to EM base.
     dtype: numpy dtype
@@ -62,6 +67,8 @@ class DeformableRegistration(EMRegistration):
                  w=0.0,
                  low_rank_method="randomized_svd",
                  low_rank_tolerance=0.0,
+                 optimize_similarity=False,
+                 with_scale=True,
                  *args,
                  **kwargs):
         """
@@ -91,6 +98,12 @@ class DeformableRegistration(EMRegistration):
             Number of nearest neighbors to query in the k-d tree. Defaults to 10.
         radius_mode: bool, optional
             If True, mask neighbors beyond sigma-derived radius in sparse E-step.
+        optimize_similarity: bool, optional
+            Whether to jointly optimize a global similarity transform. Defaults
+            to False, preserving traditional deformable CPD behavior.
+        with_scale: bool, optional
+            Whether the similarity transform includes uniform scale. Ignored
+            when ``optimize_similarity`` is False. Defaults to True.
         w: float, optional
             Outlier weight in [0,1). Forwarded to EM base.
         dtype: numpy dtype, optional
@@ -106,6 +119,11 @@ class DeformableRegistration(EMRegistration):
         self.alpha = 2.0 if alpha is None else alpha
         self.beta = 2.0 if beta is None else beta
         self.low_rank = low_rank
+        self.optimize_similarity = bool(optimize_similarity)
+        self.with_scale = bool(with_scale)
+        self.R = np.eye(self.D, dtype=self.dtype)
+        self.s = self.dtype.type(1.0)
+        self.t = np.zeros((1, self.D), dtype=self.dtype)
         self.W = np.zeros((self.M, self.D), dtype=self.dtype)
         self._low_rank_coefficients = None
         self._low_rank_coefficients_current = False
@@ -233,9 +251,30 @@ class DeformableRegistration(EMRegistration):
         is enabled, it uses the Woodbury matrix identity to solve the linear system
         efficiently. Otherwise, it solves the full-rank system directly.
         """
+        if self.optimize_similarity:
+            tiny = np.finfo(self.dtype).tiny
+            self.R, scale, self.t = self._weighted_similarity_update(
+                self._current_deformed_source()
+            )
+            self.s = self.dtype.type(scale if self.with_scale else 1.0)
+            xbar = self.PX / np.maximum(self.P1, tiny)[:, None]
+            local_targets = self._inverse_similarity(xbar)
+            F = self.P1[:, None] * (local_targets - self.Y)
+            scale = self.s if self.with_scale else 1.0
+            lambda_val = self.dtype.type(
+                self.alpha * self.sigma2 / max(scale * scale, tiny)
+            )
+        else:
+            F = self.PX - (self.P1[:, None] * self.Y)
+            lambda_val = (
+                self.dtype.type(self.alpha * self.sigma2)
+                if self.low_rank
+                else self.alpha * self.sigma2
+            )
+
         if not self.low_rank:
-            A = (self.P1[:, None] * self.G) + self.alpha * self.sigma2 * np.eye(self.M, dtype=self.dtype)
-            B = self.PX - (self.P1[:, None] * self.Y)
+            A = (self.P1[:, None] * self.G) + lambda_val * np.eye(self.M, dtype=self.dtype)
+            B = F
             self.W = np.linalg.solve(A, B)
             self._low_rank_coefficients = None
             self._low_rank_coefficients_current = False
@@ -244,10 +283,75 @@ class DeformableRegistration(EMRegistration):
             # The system is (diag(P1)QSQ' + lambda*I)W = F, where lambda = alpha*sigma^2.
             # The solution is W = (1/lambda) * (F - DQ(lambda*S^-1 + Q'DQ)^-1 * Q'F).
             # The following code implements this solution.
-            lambda_val = self.dtype.type(self.alpha * self.sigma2)
-            F = self.PX - (self.P1[:, np.newaxis] * self.Y)
-            
             self._update_low_rank_transform(self.P1, F, lambda_val)
+
+        if self.optimize_similarity:
+            self.R, scale, self.t = self._weighted_similarity_update(
+                self._current_deformed_source()
+            )
+            self.s = self.dtype.type(scale if self.with_scale else 1.0)
+
+    def _apply_similarity(self, points):
+        return self.s * (points @ self.R.T) + self.t
+
+    def _inverse_similarity(self, points):
+        scale = self.s if self.with_scale else 1.0
+        scale = max(float(scale), np.finfo(self.dtype).tiny)
+        return (points - self.t) @ self.R / scale
+
+    def _current_deformed_source(self):
+        if self.low_rank:
+            if self._low_rank_coefficients_current:
+                coefficients = self._low_rank_coefficients
+            else:
+                coefficients = self._S_values[:, None] * (
+                    self.Q.T @ self.W
+                )
+            return self.Y + self.Q @ coefficients
+        return self.Y + self.G @ self.W
+
+    def _weighted_similarity_update(self, deformed_source):
+        tiny = np.finfo(self.dtype).tiny
+        if not np.isfinite(self.Np) or self.Np <= tiny:
+            return self.R, float(self.s), self.t
+        weight_sum = max(float(self.Np), tiny)
+        source_mean = (
+            self.P1 @ deformed_source
+        ).reshape(1, self.D) / weight_sum
+        target_mean = np.sum(
+            self.PX, axis=0, keepdims=True
+        ) / weight_sum
+        covariance = (
+            deformed_source.T @ self.PX
+            - weight_sum * (source_mean.T @ target_mean)
+        )
+        U, _, Vt = np.linalg.svd(
+            covariance, full_matrices=False
+        )
+        correction = np.eye(self.D, dtype=self.dtype)
+        correction[-1, -1] = np.sign(np.linalg.det(U @ Vt))
+        auxiliary_rotation = U @ correction @ Vt
+        rotation = auxiliary_rotation.T
+        if self.with_scale:
+            numerator = np.trace(auxiliary_rotation.T @ covariance)
+            denominator = (
+                self.P1 @ np.sum(
+                    deformed_source * deformed_source, axis=1
+                )
+                - weight_sum * np.sum(source_mean * source_mean)
+            )
+            if denominator <= tiny or not np.isfinite(denominator):
+                scale = float(self.s)
+            else:
+                scale = float(numerator / denominator)
+                if not np.isfinite(scale) or scale <= tiny:
+                    scale = float(self.s)
+        else:
+            scale = 1.0
+        translation = target_mean - scale * (
+            source_mean @ rotation.T
+        )
+        return rotation, scale, translation
 
     def _update_low_rank_transform(self, weights, F, lambda_val):
         """Solve a low-rank CPD M-step and cache deformation coefficients."""
@@ -343,7 +447,12 @@ class DeformableRegistration(EMRegistration):
         if Y is not None:
             # Apply the transformation to a new point cloud.
             G_new = gaussian_kernel(X=Y, Y=self.Y, beta=self.beta)
-            return Y + G_new @ self.W
+            deformed = Y + G_new @ self.W
+            return (
+                self._apply_similarity(deformed)
+                if self.optimize_similarity
+                else deformed
+            )
         else:
             # Transform the original source point cloud.
             if self.low_rank:
@@ -357,9 +466,14 @@ class DeformableRegistration(EMRegistration):
                     )
                 self._low_rank_coefficients = coefficients
                 self._low_rank_coefficients_current = False
-                self.TY = self.Y + self.Q @ coefficients
+                deformed = self.Y + self.Q @ coefficients
             else:
-                self.TY = self.Y + self.G @ self.W
+                deformed = self.Y + self.G @ self.W
+            self.TY = (
+                self._apply_similarity(deformed)
+                if self.optimize_similarity
+                else deformed
+            )
             return self.TY
 
     def update_variance(self):
@@ -399,3 +513,16 @@ class DeformableRegistration(EMRegistration):
             return self.Q, self.S, self.W
         else:
             return self.G, self.W
+
+    def get_similarity_parameters(self):
+        """
+        Returns the learned global similarity transformation.
+
+        Returns
+        -------
+        tuple
+            Rotation matrix, uniform scale, and translation vector
+            ``(R, s, t)``. Identity parameters are returned when similarity
+            optimization is disabled.
+        """
+        return self.R, self.s, self.t

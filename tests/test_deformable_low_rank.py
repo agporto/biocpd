@@ -264,6 +264,168 @@ def test_public_transform_respects_an_explicitly_replaced_W():
     )
 
 
+@pytest.mark.parametrize("with_scale", [False, True])
+def test_weighted_similarity_update_recovers_known_transform(with_scale):
+    generator = np.random.default_rng(120)
+    source = generator.normal(size=(40, 3))
+    source *= np.array([1.6, 0.8, 0.35])
+    angle = 0.31
+    rotation = np.array([
+        [np.cos(angle), -np.sin(angle), 0.0],
+        [np.sin(angle), np.cos(angle), 0.0],
+        [0.0, 0.0, 1.0],
+    ])
+    scale = 1.35 if with_scale else 1.0
+    translation = np.array([[0.4, -0.25, 0.15]])
+    target = scale * (source @ rotation.T) + translation
+    weights = 0.25 + generator.random(len(source))
+    registration = DeformableRegistration(
+        X=target,
+        Y=source,
+        low_rank=False,
+        use_kdtree=False,
+        optimize_similarity=True,
+        with_scale=with_scale,
+        dtype=np.float64,
+        max_iterations=0,
+    )
+    registration.P1 = weights
+    registration.PX = weights[:, None] * target
+    registration.Np = float(weights.sum())
+
+    actual_rotation, actual_scale, actual_translation = (
+        registration._weighted_similarity_update(source)
+    )
+
+    np.testing.assert_allclose(
+        actual_rotation, rotation, atol=1e-12, rtol=1e-12
+    )
+    np.testing.assert_allclose(
+        actual_scale, scale, atol=1e-12, rtol=1e-12
+    )
+    np.testing.assert_allclose(
+        actual_translation, translation, atol=1e-12, rtol=1e-12
+    )
+
+
+def test_similarity_is_applied_after_deformation_and_reported_separately():
+    generator = np.random.default_rng(121)
+    source = generator.normal(size=(32, 3))
+    registration = DeformableRegistration(
+        X=source,
+        Y=source,
+        beta=1.2,
+        low_rank=False,
+        use_kdtree=False,
+        optimize_similarity=True,
+        dtype=np.float64,
+        max_iterations=0,
+    )
+    registration.W = 0.02 * generator.normal(size=source.shape)
+    angle = -0.24
+    registration.R = np.array([
+        [np.cos(angle), -np.sin(angle), 0.0],
+        [np.sin(angle), np.cos(angle), 0.0],
+        [0.0, 0.0, 1.0],
+    ])
+    registration.s = 1.18
+    registration.t = np.array([[0.3, -0.2, 0.1]])
+    deformed = source + registration.G @ registration.W
+    expected = registration.s * (
+        deformed @ registration.R.T
+    ) + registration.t
+
+    actual = registration.transform_point_cloud()
+    actual_rotation, actual_scale, actual_translation = (
+        registration.get_similarity_parameters()
+    )
+
+    np.testing.assert_allclose(actual, expected, atol=1e-12, rtol=1e-12)
+    np.testing.assert_array_equal(actual_rotation, registration.R)
+    assert actual_scale == registration.s
+    np.testing.assert_array_equal(actual_translation, registration.t)
+    assert len(registration.get_registration_parameters()) == 2
+
+
+def test_disabled_similarity_preserves_identity_and_legacy_transform():
+    generator = np.random.default_rng(122)
+    source = generator.normal(size=(30, 3))
+    registration = DeformableRegistration(
+        X=source,
+        Y=source,
+        beta=1.1,
+        low_rank=False,
+        use_kdtree=False,
+        optimize_similarity=False,
+        dtype=np.float64,
+        max_iterations=0,
+    )
+    registration.W = 0.015 * generator.normal(size=source.shape)
+    expected = source + registration.G @ registration.W
+
+    actual = registration.transform_point_cloud()
+    rotation, scale, translation = (
+        registration.get_similarity_parameters()
+    )
+
+    np.testing.assert_allclose(actual, expected, atol=1e-12, rtol=1e-12)
+    np.testing.assert_array_equal(rotation, np.eye(3))
+    assert scale == 1.0
+    np.testing.assert_array_equal(translation, np.zeros((1, 3)))
+
+
+def test_deformable_registration_jointly_fits_similarity_and_deformation():
+    generator = np.random.default_rng(123)
+    source = generator.normal(size=(80, 3))
+    source *= np.array([1.5, 0.7, 0.3])
+    angle = 0.18
+    rotation = np.array([
+        [np.cos(angle), -np.sin(angle), 0.0],
+        [np.sin(angle), np.cos(angle), 0.0],
+        [0.0, 0.0, 1.0],
+    ])
+    target = (
+        1.15 * (source @ rotation.T)
+        + np.array([[0.2, -0.15, 0.08]])
+    )
+    registration = DeformableRegistration(
+        X=target,
+        Y=source,
+        alpha=20.0,
+        beta=2.0,
+        low_rank=False,
+        use_kdtree=False,
+        optimize_similarity=True,
+        with_scale=True,
+        dtype=np.float64,
+        max_iterations=100,
+        tolerance=1e-8,
+    )
+
+    transformed, _ = registration.register()
+
+    rms = np.sqrt(np.mean((transformed - target) ** 2))
+    assert rms < 1e-5
+    assert registration.s > 1.05
+    assert np.linalg.norm(registration.R - np.eye(3)) > 0.1
+
+
+def test_constrained_deformable_rejects_unsupported_similarity_option():
+    source, target, beta = _deformable_problem(124, point_count=20)
+    ids = np.arange(3)
+
+    with pytest.raises(ValueError, match="only by DeformableRegistration"):
+        ConstrainedDeformableRegistration(
+            X=target,
+            Y=source,
+            source_id=ids,
+            target_id=ids,
+            beta=beta,
+            optimize_similarity=True,
+            max_iterations=0,
+        )
+
+
 def test_low_rank_registration_preserves_transform_override_hook():
     class TrackingRegistration(DeformableRegistration):
         def __init__(self, *args, **kwargs):

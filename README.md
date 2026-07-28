@@ -51,8 +51,10 @@ TY_affine, (B, t) = aff.register()
 defm = DeformableRegistration(X=X, Y=Y, alpha=2.0, beta=2.0, low_rank=True, num_eig=80,
                               low_rank_method="pivoted_cholesky",
                               use_kdtree=True, k=10, radius_mode=False, w=0.05,
+                              optimize_similarity=True, with_scale=True,
                               max_iterations=50)
 TY_def, params = defm.register()
+R, s, t = defm.get_similarity_parameters()
 
 # Constrained Deformable CPD
 ids = np.arange(10)
@@ -164,6 +166,9 @@ skip it for inputs already known to be aligned.
   square-root-weighted Gram matrix. This is exact, applies to constrained and
   unconstrained registration, and requires no additional option.
 - `radius_mode`: optional radius gating in sparse E-step (off by default)
+- `optimize_similarity`, `with_scale` (deformable): jointly estimate global
+  rotation and translation, with optional uniform scale, outside the Gaussian
+  deformation field. Similarity optimization is off by default.
 - `w`: outlier weight (0 ≤ w < 1) in GMM
 - `dtype` (deformable, constrained deformable, atlas): defaults to `np.float32`; set `dtype=np.float64` when you need the extra precision
 - `dense_block_size` (atlas): defaults to a cache-aware block selected from the

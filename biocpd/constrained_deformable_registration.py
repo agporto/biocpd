@@ -29,6 +29,11 @@ class ConstrainedDeformableRegistration(DeformableRegistration):
 
     def __init__(self, e_alpha = None, source_id = None, target_id= None, use_kdtree=True, k=10, *args, **kwargs):
         super().__init__(use_kdtree=use_kdtree, k=k, *args, **kwargs)
+        if self.optimize_similarity:
+            raise ValueError(
+                "optimize_similarity is currently supported only by "
+                "DeformableRegistration."
+            )
         if e_alpha is not None and (not isinstance(e_alpha, numbers.Number) or e_alpha <= 0):
             raise ValueError(
                 "Expected a positive value for regularization parameter e_alpha. Instead got: {}".format(e_alpha))
